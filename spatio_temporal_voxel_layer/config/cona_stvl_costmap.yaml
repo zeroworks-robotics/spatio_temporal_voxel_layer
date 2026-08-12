@@ -16,12 +16,20 @@ costmap:
       track_unknown_space: false
 
       rolling_window: true
-      width: 16
-      height: 16
+      # 14 m, not 16: the planner resamples this into a robot-centred 10x10 m window
+      # that rotates with the robot, so an axis-aligned costmap needs 10*sqrt(2) =
+      # 14.14 m to cover it at any heading. 14 clips only the extreme diagonal
+      # corners by 7 cm while dropping 23% of the cells (160k -> 122k).
+      width: 14
+      height: 14
       resolution: 0.04
 
-      # Ranger Mini V3: 738 x 500 mm
-      footprint: "[[0.37, 0.25], [0.37, -0.25], [-0.37, -0.25], [-0.37, 0.25]]"
+      # Chassis is 0.80 x 0.70 (half 0.40 x 0.35); this polygon is one voxel (0.04)
+      # larger per side. Clearing tests cell CENTRES, and the voxel containing the
+      # body surface centres at ~0.415 m -- outside a 0.40 polygon, so the body
+      # edge survived in 194/194 frames until this margin was added. Clearing only:
+      # CoNA 0_General keeps the true size for collision checking.
+      footprint: "[[0.44, 0.39], [0.44, -0.39], [-0.44, -0.39], [-0.44, 0.39]]"
 
       plugins: ["stvl_layer"]
 
@@ -32,7 +40,7 @@ costmap:
         decay_model:              0      # 0=linear, 1=exponential, -1=persistent
         voxel_size:               0.04   # meters
         track_unknown_space:      false
-        mark_threshold:           0
+        mark_threshold:           3      # 0 marked on a single voxel; 2+ starts dropping short obstacles
         update_footprint_enabled: true
         combination_method:       0      # 0=Overwrite: keeps NO_INFORMATION, which Max discards
         origin_z:                 0.0
@@ -45,7 +53,6 @@ costmap:
           front_mark front_clear
           left_mark left_clear
           right_mark right_clear
-          back_mark back_clear
           fdown_mark fdown_clear
           lidar_mark lidar_clear
 
@@ -57,14 +64,12 @@ costmap:
           clearing: false
           obstacle_range: 3.0
           min_obstacle_height: 0.08
-          max_obstacle_height: 2.0
-          min_z: 0.08
-          max_z: 1.20                  # keep the ceiling out of the marking sources
+          max_obstacle_height: 1.20    # global frame: 1.20 m off the floor (= nvblox esdf_slice_max_height)
           expected_update_rate: 0.0
           observation_persistence: 0.0
           inf_is_valid: false
           filter: "voxel"
-          voxel_min_points: 2
+          voxel_min_points: 3
           clear_after_reading: true
         front_clear:
           data_type: PointCloud2
@@ -87,14 +92,12 @@ costmap:
           clearing: false
           obstacle_range: 3.0
           min_obstacle_height: 0.08
-          max_obstacle_height: 2.0
-          min_z: 0.08
-          max_z: 1.20                  # keep the ceiling out of the marking sources
+          max_obstacle_height: 1.20    # global frame: 1.20 m off the floor (= nvblox esdf_slice_max_height)
           expected_update_rate: 0.0
           observation_persistence: 0.0
           inf_is_valid: false
           filter: "voxel"
-          voxel_min_points: 2
+          voxel_min_points: 3
           clear_after_reading: true
         left_clear:
           data_type: PointCloud2
@@ -117,14 +120,12 @@ costmap:
           clearing: false
           obstacle_range: 3.0
           min_obstacle_height: 0.08
-          max_obstacle_height: 2.0
-          min_z: 0.08
-          max_z: 1.20                  # keep the ceiling out of the marking sources
+          max_obstacle_height: 1.20    # global frame: 1.20 m off the floor (= nvblox esdf_slice_max_height)
           expected_update_rate: 0.0
           observation_persistence: 0.0
           inf_is_valid: false
           filter: "voxel"
-          voxel_min_points: 2
+          voxel_min_points: 3
           clear_after_reading: true
         right_clear:
           data_type: PointCloud2
@@ -147,14 +148,12 @@ costmap:
           clearing: false
           obstacle_range: 3.0
           min_obstacle_height: 0.08
-          max_obstacle_height: 2.0
-          min_z: 0.08
-          max_z: 1.20                  # keep the ceiling out of the marking sources
+          max_obstacle_height: 1.20    # global frame: 1.20 m off the floor (= nvblox esdf_slice_max_height)
           expected_update_rate: 0.0
           observation_persistence: 0.0
           inf_is_valid: false
           filter: "voxel"
-          voxel_min_points: 2
+          voxel_min_points: 3
           clear_after_reading: true
         back_clear:
           data_type: PointCloud2
@@ -177,14 +176,12 @@ costmap:
           clearing: false
           obstacle_range: 2.5
           min_obstacle_height: 0.08
-          max_obstacle_height: 2.0
-          min_z: 0.08
-          max_z: 1.20                  # keep the ceiling out of the marking sources
+          max_obstacle_height: 1.20    # global frame: 1.20 m off the floor (= nvblox esdf_slice_max_height)
           expected_update_rate: 0.0
           observation_persistence: 0.0
           inf_is_valid: false
           filter: "voxel"
-          voxel_min_points: 2
+          voxel_min_points: 3
           clear_after_reading: true
         fdown_clear:
           data_type: PointCloud2
@@ -207,14 +204,12 @@ costmap:
           clearing: false
           obstacle_range: 8.0
           min_obstacle_height: 0.08
-          max_obstacle_height: 2.0
-          min_z: 0.08
-          max_z: 1.20                  # keep the ceiling out of the marking sources
+          max_obstacle_height: 1.20    # global frame: 1.20 m off the floor (= nvblox esdf_slice_max_height)
           expected_update_rate: 0.0
           observation_persistence: 0.0
           inf_is_valid: false
           filter: "voxel"
-          voxel_min_points: 1
+          voxel_min_points: 3   # 1 let a single stray return mark an obstacle
           clear_after_reading: true
         lidar_clear:
           data_type: PointCloud2
