@@ -20,8 +20,8 @@ export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
     export CYCLONEDDS_URI=file:///etc/coga-robotics/conf/cyclonedds.xml
 
 NODE=/costmap/costmap
-CFG=$(ros2 pkg prefix spatio_temporal_voxel_layer 2>/dev/null)/share/spatio_temporal_voxel_layer/example/cona_stvl_costmap.yaml
-[ -f "$CFG" ] || CFG=$HOME/ros2_ws/src/spatio_temporal_voxel_layer/spatio_temporal_voxel_layer/example/cona_stvl_costmap.yaml
+CFG=$(ros2 pkg prefix spatio_temporal_voxel_layer 2>/dev/null)/share/spatio_temporal_voxel_layer/config/cona_stvl_costmap.yaml
+[ -f "$CFG" ] || CFG=$HOME/ros2_ws/src/spatio_temporal_voxel_layer/spatio_temporal_voxel_layer/config/cona_stvl_costmap.yaml
 LOG=$HOME/stvl_test/stvl.log
 
 echo "config: $CFG"

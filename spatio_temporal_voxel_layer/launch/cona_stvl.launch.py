@@ -26,7 +26,7 @@ COSTMAP_NODE = '/costmap/costmap'
 
 def generate_launch_description():
     pkg = get_package_share_directory('spatio_temporal_voxel_layer')
-    default_params = os.path.join(pkg, 'example', 'cona_stvl_costmap.yaml')
+    default_params = os.path.join(pkg, 'config', 'cona_stvl_costmap.yaml')
 
     params_file = LaunchConfiguration('params_file')
     autostart = LaunchConfiguration('autostart')

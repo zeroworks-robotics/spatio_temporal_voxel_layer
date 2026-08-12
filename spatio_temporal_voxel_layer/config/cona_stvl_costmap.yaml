@@ -13,7 +13,7 @@ costmap:
       # Master-level, distinct from the stvl_layer copy below: Costmap2DROS reads
       # this one to choose the master grid's default value. Without it the master
       # is reset to FREE_SPACE every cycle and unobserved space is reported clear.
-      track_unknown_space: true
+      track_unknown_space: false
 
       rolling_window: true
       width: 16
@@ -31,7 +31,7 @@ costmap:
         voxel_decay:              2.4    # seconds (linear model)
         decay_model:              0      # 0=linear, 1=exponential, -1=persistent
         voxel_size:               0.04   # meters
-        track_unknown_space:      true
+        track_unknown_space:      false
         mark_threshold:           0
         update_footprint_enabled: true
         combination_method:       0      # 0=Overwrite: keeps NO_INFORMATION, which Max discards
