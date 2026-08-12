@@ -69,7 +69,7 @@ costmap:
           observation_persistence: 0.0
           inf_is_valid: false
           filter: "voxel"
-          voxel_min_points: 3
+          voxel_min_points: 2
           clear_after_reading: true
         front_clear:
           data_type: PointCloud2
@@ -97,7 +97,7 @@ costmap:
           observation_persistence: 0.0
           inf_is_valid: false
           filter: "voxel"
-          voxel_min_points: 3
+          voxel_min_points: 2
           clear_after_reading: true
         left_clear:
           data_type: PointCloud2
@@ -125,7 +125,7 @@ costmap:
           observation_persistence: 0.0
           inf_is_valid: false
           filter: "voxel"
-          voxel_min_points: 3
+          voxel_min_points: 2
           clear_after_reading: true
         right_clear:
           data_type: PointCloud2
@@ -153,7 +153,7 @@ costmap:
           observation_persistence: 0.0
           inf_is_valid: false
           filter: "voxel"
-          voxel_min_points: 3
+          voxel_min_points: 2
           clear_after_reading: true
         back_clear:
           data_type: PointCloud2
@@ -181,7 +181,7 @@ costmap:
           observation_persistence: 0.0
           inf_is_valid: false
           filter: "voxel"
-          voxel_min_points: 3
+          voxel_min_points: 2
           clear_after_reading: true
         fdown_clear:
           data_type: PointCloud2
@@ -209,7 +209,7 @@ costmap:
           observation_persistence: 0.0
           inf_is_valid: false
           filter: "voxel"
-          voxel_min_points: 3   # 1 let a single stray return mark an obstacle
+          voxel_min_points: 2   # 1 let a single stray return mark an obstacle
           clear_after_reading: true
         lidar_clear:
           data_type: PointCloud2
