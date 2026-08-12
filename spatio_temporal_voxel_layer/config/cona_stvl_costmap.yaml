@@ -36,7 +36,7 @@ costmap:
       stvl_layer:
         plugin: "spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer"
         enabled:                  true
-        voxel_decay:              2.4    # seconds (linear model)
+        voxel_decay:              1.0    # trail length; 10 frames of slack at the 10 Hz integration rate
         decay_model:              0      # 0=linear, 1=exponential, -1=persistent
         voxel_size:               0.04   # meters
         track_unknown_space:      false
@@ -84,7 +84,7 @@ costmap:
           max_z: 4.0
           vertical_fov_angle: 1.1472    # 65.7 deg, from fx=371.49
           horizontal_fov_angle: 1.4222  # 81.5 deg
-          decay_acceleration: 2.0    # cubic: in-frustum voxels expire at ~1.40 s (0.0 -> 2.40, 5.0 -> 1.10)
+          decay_acceleration: 0.0    # any non-zero value behaves the same (cubic); trail length is set by voxel_decay
           model_type: 0
           clear_after_reading: true
 
@@ -112,7 +112,7 @@ costmap:
           max_z: 4.0
           vertical_fov_angle: 1.1376    # 65.2 deg, from fx=375.43
           horizontal_fov_angle: 1.4117  # 80.9 deg
-          decay_acceleration: 2.0    # cubic: in-frustum voxels expire at ~1.40 s (0.0 -> 2.40, 5.0 -> 1.10)
+          decay_acceleration: 0.0    # any non-zero value behaves the same (cubic); trail length is set by voxel_decay
           model_type: 0
           clear_after_reading: true
 
@@ -140,7 +140,7 @@ costmap:
           max_z: 4.0
           vertical_fov_angle: 1.1300    # 64.7 deg, from fx=378.59
           horizontal_fov_angle: 1.4035  # 80.4 deg
-          decay_acceleration: 2.0    # cubic: in-frustum voxels expire at ~1.40 s (0.0 -> 2.40, 5.0 -> 1.10)
+          decay_acceleration: 0.0    # any non-zero value behaves the same (cubic); trail length is set by voxel_decay
           model_type: 0
           clear_after_reading: true
 
@@ -168,7 +168,7 @@ costmap:
           max_z: 4.0
           vertical_fov_angle: 1.1494    # 65.9 deg, from fx=370.57
           horizontal_fov_angle: 1.4246  # 81.6 deg
-          decay_acceleration: 2.0    # cubic: in-frustum voxels expire at ~1.40 s (0.0 -> 2.40, 5.0 -> 1.10)
+          decay_acceleration: 0.0    # any non-zero value behaves the same (cubic); trail length is set by voxel_decay
           model_type: 0
           clear_after_reading: true
 
@@ -196,7 +196,7 @@ costmap:
           max_z: 3.0
           vertical_fov_angle: 1.1274    # 64.6 deg, from fx=379.68
           horizontal_fov_angle: 1.4006  # 80.2 deg
-          decay_acceleration: 2.0    # cubic: in-frustum voxels expire at ~1.40 s (0.0 -> 2.40, 5.0 -> 1.10)
+          decay_acceleration: 0.0    # any non-zero value behaves the same (cubic); trail length is set by voxel_decay
           model_type: 0
           clear_after_reading: true
 
@@ -224,6 +224,6 @@ costmap:
           max_z: 10.0
           vertical_fov_angle: 1.5708    # 90 deg dome
           horizontal_fov_angle: 6.2832  # >6.27 -> full 360 mode
-          decay_acceleration: 2.0    # cubic: in-frustum voxels expire at ~1.40 s (0.0 -> 2.40, 5.0 -> 1.10)
+          decay_acceleration: 0.0    # any non-zero value behaves the same (cubic); trail length is set by voxel_decay
           model_type: 1                 # 3D lidar hourglass frustum
           clear_after_reading: true
