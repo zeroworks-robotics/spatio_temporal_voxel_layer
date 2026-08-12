@@ -128,6 +128,15 @@ install(DIRECTORY example
   DESTINATION share/${PROJECT_NAME}
 )
 
+install(DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME}
+)
+
+install(PROGRAMS
+  scripts/run_cona_stvl.sh
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 install(FILES costmap_plugins.xml
   DESTINATION share/${PROJECT_NAME}
 )
