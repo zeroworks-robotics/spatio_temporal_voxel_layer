@@ -110,6 +110,7 @@ public:
     const bool & enabled,
     const bool & clear_buffer_after_reading,
     const ModelType & model_type,
+    const std::string & height_filter_frame,
     rclcpp::Clock::SharedPtr clock,
     rclcpp::Logger logger);
 
@@ -165,6 +166,10 @@ private:
   int _voxel_min_points;
   bool _clear_buffer_after_reading, _enabled;
   ModelType _model_type;
+  // Frame the min/max_obstacle_height band is measured in. Empty means the global frame,
+  // which is the upstream behaviour; naming base_link ties the band to the chassis so it
+  // tilts with the robot on a ramp instead of staying level with the world.
+  std::string _height_filter_frame;
   rclcpp::Clock::SharedPtr clock_;
   rclcpp::Logger logger_;
 };

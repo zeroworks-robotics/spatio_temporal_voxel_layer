@@ -172,7 +172,7 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
     double observation_keep_time, expected_update_rate, min_obstacle_height, max_obstacle_height;
     double min_z, max_z, vFOV, vFOVPadding;
     double hFOV, decay_acceleration, obstacle_range;
-    std::string topic, sensor_frame, data_type, filter_str;
+    std::string topic, sensor_frame, data_type, filter_str, height_filter_frame;
     bool inf_is_valid = false, clearing, marking;
     bool clear_after_reading, enabled;
     int voxel_min_points;
@@ -203,9 +203,17 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
     declareParameter(source + "." + "clear_after_reading", rclcpp::ParameterValue(false));
     declareParameter(source + "." + "enabled", rclcpp::ParameterValue(true));
     declareParameter(source + "." + "model_type", rclcpp::ParameterValue(0));
+    // Frame the min/max_obstacle_height band is measured in. Empty keeps the upstream
+    // behaviour of gating in the global frame; set it to base_link and the band tilts
+    // with the chassis, which is what a height limit means on a ramp.
+    declareParameter(
+      source + "." + "height_filter_frame",
+      rclcpp::ParameterValue(std::string("")));
 
     node->get_parameter(name_ + "." + source + "." + "topic", topic);
     node->get_parameter(name_ + "." + source + "." + "sensor_frame", sensor_frame);
+    node->get_parameter(
+      name_ + "." + source + "." + "height_filter_frame", height_filter_frame);
     node->get_parameter(
       name_ + "." + source + "." + "observation_persistence",
       observation_keep_time);
@@ -271,6 +279,7 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
           transform_tolerance, min_z, max_z, vFOV, vFOVPadding, hFOV,
           decay_acceleration, marking, clearing, _voxel_size,
           filter, voxel_min_points, enabled, clear_after_reading, model_type,
+          height_filter_frame,
           node->get_clock(), node->get_logger())));
 
     // Add buffer to marking observation buffers

@@ -61,6 +61,7 @@ MeasurementBuffer::MeasurementBuffer(
   const bool & clearing, const double & voxel_size, const Filters & filter,
   const int & voxel_min_points, const bool & enabled,
   const bool & clear_buffer_after_reading, const ModelType & model_type,
+  const std::string & height_filter_frame,
   rclcpp::Clock::SharedPtr clock, rclcpp::Logger logger)
 : _buffer(tf),
   _observation_keep_time(rclcpp::Duration::from_seconds(observation_keep_time)),
@@ -75,7 +76,8 @@ MeasurementBuffer::MeasurementBuffer(
   _voxel_size(voxel_size), _marking(marking), _clearing(clearing),
   _filter(filter), _voxel_min_points(voxel_min_points),
   _clear_buffer_after_reading(clear_buffer_after_reading),
-  _enabled(enabled), _model_type(model_type), clock_(clock), logger_(logger)
+  _enabled(enabled), _model_type(model_type),
+  _height_filter_frame(height_filter_frame), clock_(clock), logger_(logger)
 /*****************************************************************************/
 {
 }
@@ -137,11 +139,26 @@ void MeasurementBuffer::BufferROSCloud(
       return;
     }
 
-    // transform the cloud in the global frame
+    // Height gating happens in _height_filter_frame, which is the global frame unless a
+    // source names another one. Filtering in the global frame means the band is measured
+    // from the world's horizontal, so on a ramp it no longer describes the robot: drive
+    // 1 m down a slope and a 0.30 m obstacle sits at global z = -0.70, below
+    // min_obstacle_height, and is dropped. Naming base_link instead keeps the band tied
+    // to the chassis and tilts with it.
+    //
+    // The cloud goes to the filter frame first because both filters gate on the z FIELD
+    // and so measure whatever frame the points are already in, then on to the global
+    // frame afterwards -- second transform included, this is cheaper than it looks, since
+    // it runs on the cloud the filter has already thinned.
     point_cloud_ptr cld_global(new sensor_msgs::msg::PointCloud2());
+    const bool filter_elsewhere =
+      !_height_filter_frame.empty() && _height_filter_frame != _global_frame;
+    const std::string first_frame =
+      filter_elsewhere ? _height_filter_frame : _global_frame;
+
     geometry_msgs::msg::TransformStamped tf_stamped =
       _buffer.lookupTransform(
-      _global_frame, cloud.header.frame_id,
+      first_frame, cloud.header.frame_id,
       tf2_ros::fromMsg(cloud.header.stamp));
     tf2::doTransform(cloud, *cld_global, tf_stamped);
 
@@ -172,6 +189,16 @@ void MeasurementBuffer::BufferROSCloud(
         _min_obstacle_height, _max_obstacle_height);
       pass_through_filter.filter(*cloud_filtered);
       pcl_conversions::fromPCL(*cloud_filtered, *cld_global);
+    }
+
+    if (filter_elsewhere) {
+      point_cloud_ptr cld_out(new sensor_msgs::msg::PointCloud2());
+      geometry_msgs::msg::TransformStamped tf_to_global =
+        _buffer.lookupTransform(
+        _global_frame, _height_filter_frame,
+        tf2_ros::fromMsg(cloud.header.stamp));
+      tf2::doTransform(*cld_global, *cld_out, tf_to_global);
+      cld_global.swap(cld_out);
     }
 
     _observation_list.front()._cloud.reset(cld_global.release());
