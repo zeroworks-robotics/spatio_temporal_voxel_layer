@@ -48,7 +48,7 @@ costmap:
         update_footprint_enabled: true
         combination_method:       0      # 0=Overwrite: keeps NO_INFORMATION, which Max discards
         origin_z:                 0.0
-        publish_voxel_map:        false   # tuning only - set false for production
+        publish_voxel_map:        false  # 3D grid for RViz; off in production
         transform_tolerance:      0.5
         mapping_mode:             false
         map_save_duration:        60.0
@@ -58,7 +58,7 @@ costmap:
           left_mark left_clear
           right_mark right_clear
           fdown_mark fdown_clear
-          rear_mark rear_clear
+          back_mark back_clear
           lidar_mark lidar_clear
 
         # ---------------- front RGBD (level, +x) ----------------
