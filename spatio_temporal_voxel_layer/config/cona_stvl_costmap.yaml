@@ -5,7 +5,12 @@ costmap:
 
       global_frame: map
       robot_base_frame: base_link
-      transform_tolerance: 0.5
+      # Not the knob that keeps the grid from being wiped -- that is
+      # stvl_layer.transform_tolerance below, and the two are unrelated despite the
+      # shared name. Costmap2DROS spends this one in getRobotPose(), which asks for
+      # the latest common time and so almost never waits on a tf gap. Raised to 1.0
+      # only so the two values stop reading as if they disagreed.
+      transform_tolerance: 1.0
 
       update_frequency: 15.0
       publish_frequency: 15.0
@@ -57,8 +62,15 @@ costmap:
         # a 10 Hz source and starved the grid past voxel_decay 12 times in 500 s;
         # 1.0 covers the worst gap and drops 0.58%. The cost is latency, not accuracy
         # -- tf2 still interpolates the cloud's own stamp, it just arrives later.
-        # The master transform_tolerance above stays 0.5: getRobotPose asks for the
-        # latest common time, so it never waits on a gap.
+        # The master transform_tolerance above is a different knob and is not what
+        # fixes this: getRobotPose asks for the latest common time, so it never waits
+        # on a gap.
+        #
+        # Confirmed on the robot at up to 1.3 m/s, same route both times. At 0.5:
+        # 14 collapses in 198 s, 24 frames with the costmap completely blank, 54
+        # dropped clouds. At 1.0: 2 collapses in 210 s, 0.10 s each, never below 722
+        # lethal cells, 6 dropped clouds. The tf gaps were the same either way
+        # (721 vs 740 ms worst) -- only the waiting changed.
         transform_tolerance:      1.0
         mapping_mode:             false
         map_save_duration:        60.0
@@ -227,16 +239,34 @@ costmap:
           topic: /rslidar_points
           marking: true
           clearing: false
-          obstacle_range: 8.0
+          # 14 m, the costmap's own width. The window can only ever render 7*sqrt(2) =
+          # 9.9 m to its corner, and nothing downstream consumes voxels past that:
+          # /costmap/voxel_grid's only subscriber is rviz, and Planner_v2 reads
+          # /costmap/costmap. At 20 m a median 6.8% of live voxels sat outside the
+          # window (35.1% in open space), each one walked every cycle by
+          # TemporalClearAndGenerateCostmap and then dropped by worldToMap.
+          obstacle_range: 14.0
           min_obstacle_height: 0.08
-          max_obstacle_height: 1.20    # 1.20 m above the chassis, per height_filter_frame
+          # 1.50, while the five cameras are still at 1.20. Deliberate for now, but the
+          # bands should agree: CoNA puts the chassis at 1.3 m, so 1.20 stops below the
+          # robot's own roofline and something at 1.25 m is seen by the lidar alone.
+          max_obstacle_height: 1.50    # 1.50 m above the chassis, per height_filter_frame
           height_filter_frame: base_link   # gate height in the robot's frame, not the
                                            # world's, so the band tilts on a ramp
           expected_update_rate: 0.0
           observation_persistence: 0.0
           inf_is_valid: false
           filter: "voxel"
-          voxel_min_points: 2   # 1 let a single stray return mark an obstacle
+          # 1, not the 2 the cameras use. 2 was set in 88bd7a2 when this file had only
+          # five cameras ranged at 3.0/2.5 m and mark_threshold was 3; the lidar block
+          # arrived later and inherited the number without anyone measuring it against
+          # lidar density. Measured on one RSAIRY scan (84713 points, 4 cm voxels), the
+          # share of voxels holding 2+ returns is 81.0% at 0-2 m, 18.9% at 4-6 m, 1.4%
+          # at 6-8 m and 0.0% beyond 8 m -- so 2 was silently capping the lidar at about
+          # 6 m no matter what obstacle_range said. Single strays are still filtered,
+          # just one stage later: one point makes one voxel, and mark_threshold 2 needs
+          # two stacked in a column before the cell goes lethal.
+          voxel_min_points: 1
           clear_after_reading: true
         lidar_clear:
           data_type: PointCloud2
@@ -244,7 +274,11 @@ costmap:
           marking: false
           clearing: true
           min_z: 0.2                    # RSAIRY min_distance
-          max_z: 10.0
+          # Inert while decay_acceleration is 0.0: a voxel inside the frustum gets
+          # base_duration_to_decay - 0, which is what one outside gets anyway, so the
+          # far plane changes nothing. Kept at the deployed value; it only starts to
+          # matter if decay_acceleration ever goes non-zero.
+          max_z: 15.0
           vertical_fov_angle: 1.5708    # 90 deg dome
           horizontal_fov_angle: 6.2832  # >6.27 -> full 360 mode
           decay_acceleration: 0.0    # any non-zero value behaves the same (cubic); trail length is set by voxel_decay
