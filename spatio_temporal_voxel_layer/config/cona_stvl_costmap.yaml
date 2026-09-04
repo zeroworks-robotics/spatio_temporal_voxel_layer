@@ -72,6 +72,13 @@ costmap:
         # lethal cells, 6 dropped clouds. The tf gaps were the same either way
         # (721 vs 740 ms worst) -- only the waiting changed.
         transform_tolerance:      1.0
+        # A source whose topic ends in topic_fallback_suffix falls back to the name without
+        # it when nothing publishes the processed topic within topic_fallback_wait seconds.
+        # The wait is what makes it usable at bring-up: the costmap is configured at about
+        # the moment the producer starts, and a single check would lose that race and drop to
+        # the raw topic permanently. 0 disables the fallback and the source simply stays dark.
+        topic_fallback_wait:      3.0
+        topic_fallback_suffix:    "_deskewed"
         mapping_mode:             false
         map_save_duration:        60.0
 
@@ -236,7 +243,17 @@ costmap:
         # ---------------- RoboSense Airy 3D LiDAR ----------------
         lidar_mark:
           data_type: PointCloud2
-          topic: /rslidar_points
+          # De-skewed, not raw. The RSAIRY sweeps 360 deg in 100 ms and the driver stamps the
+          # cloud with its FIRST point (rslidar_sdk config.yaml: ts_first_point: true), so a
+          # single transform places everything captured later in the sweep as if the robot had
+          # not moved. Measured: at 2 rad/s a wall 5 m out is displaced up to 1 m, and rotation
+          # costs 10.4% of the cells the chassis could stand in. Feeding the relay's output
+          # recovers 37% of that, and 103% together with an odom-anchored grid.
+          #
+          # rslidar_sdk/rslidar_deskew_node produces this; it comes up with the lidar
+          # (AIRY_DESKEW=0 turns it off). If nothing publishes it, the layer falls back to
+          # /rslidar_points after stvl_layer.topic_fallback_wait and says so at WARN.
+          topic: /rslidar_points_deskewed
           marking: true
           clearing: false
           # 14 m, the costmap's own width. The window can only ever render 7*sqrt(2) =
@@ -270,7 +287,9 @@ costmap:
           clear_after_reading: true
         lidar_clear:
           data_type: PointCloud2
-          topic: /rslidar_points
+          # Same source as lidar_mark, for the same reason. Clearing has to agree with marking
+          # about where the points are, or the frustum clears voxels the marking never put there.
+          topic: /rslidar_points_deskewed
           marking: false
           clearing: true
           min_z: 0.2                    # RSAIRY min_distance

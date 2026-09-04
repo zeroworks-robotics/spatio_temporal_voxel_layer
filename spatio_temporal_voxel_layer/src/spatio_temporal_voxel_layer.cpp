@@ -66,6 +66,73 @@ SpatioTemporalVoxelLayer::~SpatioTemporalVoxelLayer(void)
 }
 
 /*****************************************************************************/
+std::string SpatioTemporalVoxelLayer::ResolveSourceTopic(
+  const std::string & topic, const std::string & source)
+/*****************************************************************************/
+{
+  // A source may be pointed at a processed topic that a separate node produces -- the
+  // motion-compensated lidar (/rslidar_points_deskewed) is the case this was written for.
+  // If that node is not running, subscribing anyway costs the layer its most important
+  // source and STVL says nothing about it: the buffer simply never fills and the voxels
+  // decay away. Falling back to the unprocessed topic keeps the robot seeing.
+  //
+  // It WAITS instead of checking once, because at bring-up the costmap is configured at
+  // about the same moment the producer starts, and a single check would lose that race
+  // almost every time -- falling back permanently while the producer was merely a second
+  // late. The wait is bounded and only ever happens once per source at configure time.
+  if (_topic_fallback_wait <= 0.0 || _topic_fallback_suffix.empty()) {return topic;}
+  // Two sources normally share one topic (a marking and a clearing block on the same lidar),
+  // and without this the wait would be paid once per source -- doubling the time the
+  // lifecycle configure blocks, for an answer that cannot differ between them.
+  const auto cached = _resolved_topics.find(topic);
+  if (cached != _resolved_topics.end()) {return cached->second;}
+  if (topic.size() <= _topic_fallback_suffix.size() ||
+    topic.compare(
+      topic.size() - _topic_fallback_suffix.size(),
+      _topic_fallback_suffix.size(), _topic_fallback_suffix) != 0)
+  {
+    return topic;
+  }
+  const std::string fallback =
+    topic.substr(0, topic.size() - _topic_fallback_suffix.size());
+
+  auto node = node_.lock();
+  const auto remember = [this, &topic](const std::string & chosen) {
+      _resolved_topics[topic] = chosen;
+      return chosen;
+    };
+  const auto deadline = node->now() + rclcpp::Duration::from_seconds(_topic_fallback_wait);
+  bool warned = false;
+  while (rclcpp::ok() && node->now() < deadline) {
+    if (node->count_publishers(topic) > 0) {return remember(topic);}
+    if (!warned) {
+      warned = true;
+      RCLCPP_INFO(
+        logger_, "%s: waiting up to %.1f s for a publisher on %s",
+        source.c_str(), _topic_fallback_wait, topic.c_str());
+    }
+    rclcpp::sleep_for(std::chrono::milliseconds(200));
+  }
+  if (node->count_publishers(topic) > 0) {return remember(topic);}
+
+  if (node->count_publishers(fallback) > 0) {
+    RCLCPP_WARN(
+      logger_,
+      "%s: nothing publishes %s after %.1f s, falling back to %s. The processed source is "
+      "NOT being used -- obstacles come from the raw topic until it is restarted and the "
+      "costmap is reconfigured.",
+      source.c_str(), topic.c_str(), _topic_fallback_wait, fallback.c_str());
+    return remember(fallback);
+  }
+  RCLCPP_ERROR(
+    logger_,
+    "%s: neither %s nor %s has a publisher after %.1f s. Keeping %s; this source will "
+    "produce nothing until something publishes it.",
+    source.c_str(), topic.c_str(), fallback.c_str(), _topic_fallback_wait, topic.c_str());
+  return remember(topic);
+}
+
+/*****************************************************************************/
 void SpatioTemporalVoxelLayer::onInitialize(void)
 /*****************************************************************************/
 {
@@ -89,6 +156,13 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
   // timeout in seconds for transforms
   declareParameter("transform_tolerance", rclcpp::ParameterValue(0.2));
   node->get_parameter(name_ + ".transform_tolerance", transform_tolerance);
+  // Seconds to wait for a publisher on a source topic whose name ends in the suffix below
+  // before falling back to the same name without it. 0 disables the fallback entirely.
+  // See ResolveSourceTopic for why this exists and why it waits rather than checking once.
+  declareParameter("topic_fallback_wait", rclcpp::ParameterValue(3.0));
+  node->get_parameter(name_ + ".topic_fallback_wait", _topic_fallback_wait);
+  declareParameter("topic_fallback_suffix", rclcpp::ParameterValue(std::string("_deskewed")));
+  node->get_parameter(name_ + ".topic_fallback_suffix", _topic_fallback_suffix);
   // whether to default on
   declareParameter("enabled", rclcpp::ParameterValue(true));
   node->get_parameter(name_ + ".enabled", _enabled);
@@ -211,6 +285,7 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
       rclcpp::ParameterValue(std::string("")));
 
     node->get_parameter(name_ + "." + source + "." + "topic", topic);
+    topic = ResolveSourceTopic(topic, source);
     node->get_parameter(name_ + "." + source + "." + "sensor_frame", sensor_frame);
     node->get_parameter(
       name_ + "." + source + "." + "height_filter_frame", height_filter_frame);

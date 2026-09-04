@@ -50,6 +50,7 @@
 #include <iostream>
 #include <memory>
 #include <unordered_set>
+#include <unordered_map>
 // voxel grid
 #include "spatio_temporal_voxel_layer/spatio_temporal_voxel_grid.hpp"
 // ROS
@@ -117,6 +118,10 @@ public:
   const;
   bool GetClearingObservations(std::vector<observation::MeasurementReading> & marking_observations)
   const;
+  // Resolve a source topic, falling back off _topic_fallback_suffix when nothing
+  // publishes the processed name. Blocks up to _topic_fallback_wait, at configure only.
+  std::string ResolveSourceTopic(const std::string & topic, const std::string & source);
+
   void ObservationsResetAfterReading() const;
 
   // Functions to interact with maps
@@ -181,6 +186,11 @@ private:
   std::unique_ptr<rclcpp::Duration> _map_save_duration;
   rclcpp::Time _last_map_save_time;
   std::string _global_frame;
+  // Fallback for a source pointed at a processed topic whose producer may not be running.
+  // See ResolveSourceTopic in the .cpp.
+  double _topic_fallback_wait{3.0};
+  std::string _topic_fallback_suffix{"_deskewed"};
+  std::unordered_map<std::string, std::string> _resolved_topics;
   double _voxel_size, _voxel_decay;
   int _combination_method, _mark_threshold;
   volume_grid::GlobalDecayModel _decay_model;
