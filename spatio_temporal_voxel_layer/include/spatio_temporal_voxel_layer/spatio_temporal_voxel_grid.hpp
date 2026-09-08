@@ -42,6 +42,8 @@
 
 // STL
 #include <math.h>
+#include <algorithm>
+#include <cstdint>
 #include <unordered_map>
 #include <unordered_set>
 #include <ctime>
@@ -137,12 +139,29 @@ public:
   void Mark(const std::vector<observation::MeasurementReading> & marking_observations);
   void operator()(const observation::MeasurementReading & obs) const;
   void ClearFrustums(
-    const std::vector<observation::MeasurementReading> & clearing_observations,
-    std::unordered_set<occupany_cell> & cleared_cells);
+    const std::vector<observation::MeasurementReading> & clearing_observations);
 
   // Get the pointcloud of the underlying occupancy grid
   void GetOccupancyPointCloud(std::unique_ptr<sensor_msgs::msg::PointCloud2> & pc2);
-  std::unordered_map<occupany_cell, uint> * GetFlattenedCostmap();
+
+  // Tell the grid which costmap window to flatten into, and zero the counts for the
+  // cycle. The layer calls this once per cycle, straight after updateOrigin(), because
+  // that is the only place the window can move -- and it must call it before
+  // ClearFrustums, which assumes the counts start at zero.
+  //
+  // Knowing the window here rather than in the layer buys two things: the column counts
+  // land in a dense array instead of a hash map keyed on a pair of doubles, and a voxel
+  // outside the window is dropped the moment it is seen instead of being hashed, stored,
+  // and then thrown away by the layer's worldToMap.
+  void SetCostmapWindow(
+    const double & origin_x, const double & origin_y, const double & resolution,
+    const unsigned int & size_x, const unsigned int & size_y);
+
+  // Voxel count per 2D cell of the window set above, row-major, size_x * size_y.
+  // uint16 is not a tight fit by accident: a column only ever holds
+  // (max_obstacle_height - min_obstacle_height) / voxel_size voxels, which is ~36 for the
+  // tallest source configured today, so the counter cannot come near overflowing.
+  const std::vector<uint16_t> & GetFlattenedCostmap() const;
 
   // Clear the grid
   bool ResetGrid(void);
@@ -155,9 +174,16 @@ protected:
   // Initialize grid metadata and library
   void InitializeGrid(void);
 
-  // grid accessor methods
-  bool MarkGridPoint(const openvdb::Coord & pt, const double & value) const;
-  bool ClearGridPoint(const openvdb::Coord & pt) const;
+  // grid accessor methods. The accessor is the caller's, deliberately: its whole
+  // purpose is a per-traversal node cache, and building one per point -- which is what
+  // these did -- throws that cache away and forces a fresh root-to-leaf descent on every
+  // single access. Hoisting one accessor out of the mark and clear loops is the entire
+  // point of passing it.
+  bool MarkGridPoint(
+    openvdb::DoubleGrid::Accessor & accessor, const openvdb::Coord & pt,
+    const double & value) const;
+  bool ClearGridPoint(
+    openvdb::DoubleGrid::Accessor & accessor, const openvdb::Coord & pt) const;
 
   // Check occupancy status of the grid
   bool IsGridEmpty(void) const;
@@ -166,12 +192,12 @@ protected:
   double GetTemporalClearingDuration(const double & time_delta);
   double GetFrustumAcceleration(
     const double & time_delta, const double & acceleration_factor);
-  void TemporalClearAndGenerateCostmap(
-    std::vector<frustum_model> & frustums,
-    std::unordered_set<occupany_cell> & cleared_cells);
+  void TemporalClearAndGenerateCostmap(std::vector<frustum_model> & frustums);
 
-  // Populate the costmap ROS api and pointcloud with a marked point
-  void PopulateCostmapAndPointcloud(const openvdb::Coord & pt);
+  // Populate the costmap ROS api and pointcloud with a marked point. Takes the world
+  // pose rather than the index because every caller has already paid for the
+  // index->world transform and this used to redo it.
+  void PopulateCostmapAndPointcloud(const openvdb::Vec3d & pose_world);
 
   // Utilities for tranformation
   openvdb::Vec3d WorldToIndex(const openvdb::Vec3d & coord) const;
@@ -184,7 +210,11 @@ protected:
   double _background_value, _voxel_size, _voxel_decay;
   bool _pub_voxels;
   std::unique_ptr<std::vector<geometry_msgs::msg::Point32>> _grid_points;
-  std::unordered_map<occupany_cell, uint> * _cost_map;
+  // Dense column counts over the costmap window, plus the window itself. Sized once per
+  // window change and refilled with zeros each cycle, so steady state costs no allocation.
+  std::vector<uint16_t> _cost_map;
+  double _costmap_origin_x, _costmap_origin_y, _costmap_resolution;
+  unsigned int _costmap_size_x, _costmap_size_y;
   boost::mutex _grid_lock;
 };
 
