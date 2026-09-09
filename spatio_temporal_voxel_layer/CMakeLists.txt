@@ -1,6 +1,20 @@
 cmake_minimum_required(VERSION 3.5)
 project(spatio_temporal_voxel_layer)
 
+# colcon build with no --cmake-args leaves CMAKE_BUILD_TYPE empty, and an empty build
+# type means CMake passes no -O flag at all -- i.e. -O0. That is not a small penalty
+# here: every hot loop in this package is OpenVDB tree traversal, PCL filtering or
+# Eigen arithmetic, all of which are written as small inlinable templates and lose
+# several times their speed when nothing is inlined. The layer looked like it cost
+# what STVL inherently costs; most of it was the missing -O.
+#
+# Defaulting rather than forcing: an explicit -DCMAKE_BUILD_TYPE=Debug on the command
+# line still wins, so a debug build is one flag away and stays possible.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING
+      "Build type (Release by default; -O0 is never what this package wants)" FORCE)
+endif()
+
 if(NOT WIN32)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
 endif()

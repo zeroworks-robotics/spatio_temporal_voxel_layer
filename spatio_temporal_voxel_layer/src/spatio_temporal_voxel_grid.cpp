@@ -35,6 +35,7 @@
  * Author: Steve Macenski (steven.macenski@simberobotics.com)
  *********************************************************************/
 
+#include <algorithm>
 #include <memory>
 #include <unordered_map>
 #include <string>
@@ -53,7 +54,8 @@ SpatioTemporalVoxelGrid::SpatioTemporalVoxelGrid(
 : _clock(clock), _decay_model(decay_model), _background_value(background_value),
   _voxel_size(voxel_size), _voxel_decay(voxel_decay), _pub_voxels(pub_voxels),
   _grid_points(std::make_unique<std::vector<geometry_msgs::msg::Point32>>()),
-  _cost_map(new std::unordered_map<occupany_cell, uint>)
+  _costmap_origin_x(0.), _costmap_origin_y(0.), _costmap_resolution(0.),
+  _costmap_size_x(0), _costmap_size_y(0)
 /*****************************************************************************/
 {
   this->InitializeGrid();
@@ -64,9 +66,6 @@ SpatioTemporalVoxelGrid::~SpatioTemporalVoxelGrid(void)
 /*****************************************************************************/
 {
   // pcl pointclouds free themselves
-  if (_cost_map) {
-    delete _cost_map;
-  }
 }
 
 /*****************************************************************************/
@@ -93,27 +92,54 @@ void SpatioTemporalVoxelGrid::InitializeGrid(void)
 }
 
 /*****************************************************************************/
-void SpatioTemporalVoxelGrid::ClearFrustums(
-  const std::vector<observation::MeasurementReading> & clearing_readings,
-  std::unordered_set<occupany_cell> & cleared_cells)
+void SpatioTemporalVoxelGrid::SetCostmapWindow(
+  const double & origin_x, const double & origin_y, const double & resolution,
+  const unsigned int & size_x, const unsigned int & size_y)
 /*****************************************************************************/
 {
   boost::unique_lock<boost::mutex> lock(_grid_lock);
 
-  // accelerate the decay of voxels interior to the frustum
+  _costmap_origin_x = origin_x;
+  _costmap_origin_y = origin_y;
+  _costmap_resolution = resolution;
+  _costmap_size_x = size_x;
+  _costmap_size_y = size_y;
+
+  // Resize only when the window resizes; a rolling window keeps its size and merely
+  // moves. Zeroing, on the other hand, happens on every call, and this is the right
+  // place for it precisely because it is the one step the layer runs in every mode --
+  // mapping_mode skips ClearFrustums entirely, and a window that moved under stale
+  // counts would smear last cycle's obstacles across the new one.
+  const size_t cells = static_cast<size_t>(size_x) * static_cast<size_t>(size_y);
+  if (_cost_map.size() != cells) {
+    _cost_map.assign(cells, 0);
+  } else {
+    std::fill(_cost_map.begin(), _cost_map.end(), 0);
+  }
+}
+
+/*****************************************************************************/
+void SpatioTemporalVoxelGrid::ClearFrustums(
+  const std::vector<observation::MeasurementReading> & clearing_readings)
+/*****************************************************************************/
+{
+  boost::unique_lock<boost::mutex> lock(_grid_lock);
+
+  // accelerate the decay of voxels interior to the frustum.
+  //
+  // The column counts were zeroed by SetCostmapWindow, which the layer calls at the top
+  // of every updateBounds, ahead of this.
   if (this->IsGridEmpty()) {
     _grid_points->clear();
-    _cost_map->clear();
     return;
   }
 
   _grid_points->clear();
-  _cost_map->clear();
 
   std::vector<frustum_model> obs_frustums;
 
   if (clearing_readings.size() == 0) {
-    TemporalClearAndGenerateCostmap(obs_frustums, cleared_cells);
+    TemporalClearAndGenerateCostmap(obs_frustums);
     return;
   }
 
@@ -122,6 +148,22 @@ void SpatioTemporalVoxelGrid::ClearFrustums(
   std::vector<observation::MeasurementReading>::const_iterator it =
     clearing_readings.begin();
   for (; it != clearing_readings.end(); ++it) {
+    // A source with decay_acceleration 0 cannot change any voxel's fate, so building
+    // its frustum and testing every voxel against it is pure cost. GetFrustumAcceleration
+    // is (1/6) * factor * t^3, which is identically zero when the factor is, and the two
+    // branches in TemporalClearAndGenerateCostmap then reduce to exactly the code that
+    // runs for a voxel outside every frustum -- except that the inside branch also writes
+    // the value back unchanged. So the frustum was not merely useless, it was the more
+    // expensive of the two paths.
+    //
+    // This is not a corner case on this robot: every source is configured with
+    // decay_acceleration 0.0, and lidar_clear is a 360-degree, 90-degree-tall dome that
+    // essentially every live voxel falls inside. Skipping these deletes both the frustum
+    // tests and the redundant write for the whole grid, and the result is bit-identical.
+    if (it->_decay_acceleration == 0.0) {
+      continue;
+    }
+
     geometry::Frustum * frustum = nullptr;
     if (it->_model_type == DEPTH_CAMERA) {
       frustum = new geometry::DepthCameraFrustum(
@@ -142,17 +184,19 @@ void SpatioTemporalVoxelGrid::ClearFrustums(
     frustum->TransformModel();
     obs_frustums.emplace_back(frustum, it->_decay_acceleration);
   }
-  TemporalClearAndGenerateCostmap(obs_frustums, cleared_cells);
+  TemporalClearAndGenerateCostmap(obs_frustums);
 }
 
 /*****************************************************************************/
 void SpatioTemporalVoxelGrid::TemporalClearAndGenerateCostmap(
-  std::vector<frustum_model> & frustums,
-  std::unordered_set<occupany_cell> & cleared_cells)
+  std::vector<frustum_model> & frustums)
 /*****************************************************************************/
 {
   // sample time once for all clearing readings
   const double cur_time = _clock->now().seconds();
+
+  // One accessor for the whole traversal. See MarkGridPoint for why.
+  openvdb::DoubleGrid::Accessor accessor = _grid->getAccessor();
 
   // check each point in the grid for inclusion in a frustum
   openvdb::DoubleGrid::ValueOnCIter cit_grid = _grid->cbeginValueOn();
@@ -184,14 +228,14 @@ void SpatioTemporalVoxelGrid::TemporalClearAndGenerateCostmap(
         if (time_until_decay < 0.) {
           // expired by acceleration
           cleared_point = true;
-          if (!this->ClearGridPoint(pt_index)) {
+          if (!this->ClearGridPoint(accessor, pt_index)) {
             std::cout << "Failed to clear point." << std::endl;
           }
           break;
         } else {
           const double updated_mark = cit_grid.getValue() -
             frustum_acceleration;
-          if (!this->MarkGridPoint(pt_index, updated_mark)) {
+          if (!this->MarkGridPoint(accessor, pt_index, updated_mark)) {
             std::cout << "Failed to update mark." << std::endl;
           }
           break;
@@ -204,18 +248,20 @@ void SpatioTemporalVoxelGrid::TemporalClearAndGenerateCostmap(
       if (base_duration_to_decay < 0.) {
         // expired by temporal clearing
         cleared_point = true;
-        if (!this->ClearGridPoint(pt_index)) {
+        if (!this->ClearGridPoint(accessor, pt_index)) {
           std::cout << "Failed to clear point." << std::endl;
         }
       }
     }
 
-    if (cleared_point)
-    {
-      cleared_cells.insert(occupany_cell(pose_world[0], pose_world[1]));
-    } else {
+    // A cleared voxel used to be recorded in a hash set so the layer could touch() its
+    // cell and so widen the update bounds enough for the clearing to reach the master
+    // grid. The set cost one insert per cleared voxel per cycle; the layer now simply
+    // declares the whole window dirty instead, which is a strict superset of those cells
+    // and costs two touch() calls. See UpdateROSCostmap.
+    if (!cleared_point) {
       // if here, we can add to costmap and PC2
-      PopulateCostmapAndPointcloud(pt_index);
+      PopulateCostmapAndPointcloud(pose_world);
     }
   }
 
@@ -225,12 +271,9 @@ void SpatioTemporalVoxelGrid::TemporalClearAndGenerateCostmap(
 
 /*****************************************************************************/
 void SpatioTemporalVoxelGrid::PopulateCostmapAndPointcloud(
-  const openvdb::Coord & pt)
+  const openvdb::Vec3d & pose_world)
 /*****************************************************************************/
 {
-  // add pt to the pointcloud and costmap
-  openvdb::Vec3d pose_world = this->IndexToWorld(pt);
-
   if (_pub_voxels) {
     geometry_msgs::msg::Point32 point;
     point.x = pose_world[0];
@@ -239,15 +282,26 @@ void SpatioTemporalVoxelGrid::PopulateCostmapAndPointcloud(
     _grid_points->push_back(point);
   }
 
-  std::unordered_map<occupany_cell, uint>::iterator cell;
-  cell = _cost_map->find(occupany_cell(pose_world[0], pose_world[1]));
-  if (cell != _cost_map->end()) {
-    cell->second += 1;
-  } else {
-    _cost_map->insert(
-      std::make_pair(
-        occupany_cell(pose_world[0], pose_world[1]), 1));
+  if (_cost_map.empty()) {
+    return;
   }
+
+  // Deliberately Costmap2D::worldToMap's arithmetic, character for character, including
+  // the unsigned wrap it relies on to reject anything left of or below the origin. A
+  // cell counted here that the layer would have rejected -- or the reverse -- would put
+  // obstacles a costmap cell away from where the layer believes they are.
+  if (pose_world[0] < _costmap_origin_x || pose_world[1] < _costmap_origin_y) {
+    return;
+  }
+  const unsigned int mx = static_cast<unsigned int>(
+    (pose_world[0] - _costmap_origin_x) / _costmap_resolution);
+  const unsigned int my = static_cast<unsigned int>(
+    (pose_world[1] - _costmap_origin_y) / _costmap_resolution);
+  if (mx >= _costmap_size_x || my >= _costmap_size_y) {
+    return;
+  }
+
+  _cost_map[static_cast<size_t>(my) * _costmap_size_x + mx] += 1;
 }
 
 /*****************************************************************************/
@@ -274,6 +328,9 @@ void SpatioTemporalVoxelGrid::operator()(
     float mark_range_2 = obs._obstacle_range_in_m * obs._obstacle_range_in_m;
     const double cur_time = _clock->now().seconds();
 
+    // One accessor for the whole cloud. See MarkGridPoint.
+    openvdb::DoubleGrid::Accessor accessor = _grid->getAccessor();
+
     const sensor_msgs::msg::PointCloud2 & cloud = *(obs._cloud);
     sensor_msgs::PointCloud2ConstIterator<float> iter_x(cloud, "x");
     sensor_msgs::PointCloud2ConstIterator<float> iter_y(cloud, "y");
@@ -298,6 +355,7 @@ void SpatioTemporalVoxelGrid::operator()(
           openvdb::Vec3d(x, y, z)));
 
       if (!this->MarkGridPoint(
+          accessor,
           openvdb::Coord(
             mark_grid[0], mark_grid[1],
             mark_grid[2]), cur_time))
@@ -309,8 +367,8 @@ void SpatioTemporalVoxelGrid::operator()(
 }
 
 /*****************************************************************************/
-std::unordered_map<occupany_cell, uint> *
-SpatioTemporalVoxelGrid::GetFlattenedCostmap()
+const std::vector<uint16_t> &
+SpatioTemporalVoxelGrid::GetFlattenedCostmap() const
 /*****************************************************************************/
 {
   return _cost_map;
@@ -400,8 +458,10 @@ void SpatioTemporalVoxelGrid::ResetGridArea(
 {
   boost::unique_lock<boost::mutex> lock(_grid_lock);
 
+  openvdb::DoubleGrid::Accessor accessor = _grid->getAccessor();
+
   openvdb::DoubleGrid::ValueOnCIter cit_grid = _grid->cbeginValueOn();
-  for (cit_grid; cit_grid.test(); ++cit_grid)
+  for (; cit_grid.test(); ++cit_grid)
   {
     const openvdb::Coord pt_index(cit_grid.getCoord());
     const openvdb::Vec3d pose_world = this->IndexToWorld(pt_index);
@@ -412,30 +472,40 @@ void SpatioTemporalVoxelGrid::ResetGridArea(
 
     if(in_range != invert_area)
     {
-      ClearGridPoint(pt_index);
+      ClearGridPoint(accessor, pt_index);
     }
   }
 }
 
 /*****************************************************************************/
 bool SpatioTemporalVoxelGrid::MarkGridPoint(
-  const openvdb::Coord & pt, const double & value) const
+  openvdb::DoubleGrid::Accessor & accessor, const openvdb::Coord & pt,
+  const double & value) const
 /*****************************************************************************/
 {
-  // marking the OpenVDB set
-  openvdb::DoubleGrid::Accessor accessor = _grid->getAccessor();
-
+  // marking the OpenVDB set.
+  //
+  // The accessor arrives from the caller and is reused across a whole traversal. This is
+  // the documented way to write a VDB tree: the accessor caches the node stack from the
+  // last access, so a run of nearby coordinates -- which is what both a point cloud and a
+  // value iterator produce -- resolves inside the cached leaf instead of descending from
+  // the root each time. Constructing one per call, as this used to, guarantees a cold
+  // cache on every single point. Node insertion is safe through a cached accessor; that
+  // case is exactly what ValueAccessor is built to handle.
+  //
+  // The read-back is kept: with a warm accessor it lands in the leaf the write just
+  // touched, so it now costs an array index rather than a second descent.
   accessor.setValueOn(pt, value);
   return accessor.getValue(pt) == value;
 }
 
 /*****************************************************************************/
-bool SpatioTemporalVoxelGrid::ClearGridPoint(const openvdb::Coord & pt) const
+bool SpatioTemporalVoxelGrid::ClearGridPoint(
+  openvdb::DoubleGrid::Accessor & accessor, const openvdb::Coord & pt) const
 /*****************************************************************************/
 {
-  // clearing the OpenVDB set
-  openvdb::DoubleGrid::Accessor accessor = _grid->getAccessor();
-
+  // clearing the OpenVDB set. Caller-owned accessor, same reasoning as MarkGridPoint --
+  // and it matters more here, because this does three tree accesses per call.
   if (accessor.isValueOn(pt)) {
     accessor.setValueOff(pt, _background_value);
   }

@@ -12,8 +12,38 @@ costmap:
       # only so the two values stop reading as if they disagreed.
       transform_tolerance: 1.0
 
-      update_frequency: 15.0
-      publish_frequency: 15.0
+      # publish_frequency must stay strictly above update_frequency, and that is the
+      # whole reason these are 20/40 rather than 20/20.
+      #
+      # mapUpdateLoop publishes only when last_publish_ + publish_cycle_ < now(), and
+      # on a publish it resets last_publish_ to now() rather than advancing it by
+      # publish_cycle_. Phase error therefore never accumulates: every cycle has to
+      # independently clear a full publish_cycle_ measured from the last actual
+      # publish. Set the two frequencies equal and the gate period lands exactly on the
+      # loop period, so the comparison sits on its boundary and jitter decides -- about
+      # 35% of cycles simply lose. That is what the old 15/15 was doing: the loop ran at
+      # a measured 15.00 Hz, the gate opened on 97 of 149 cycles, and /costmap/costmap
+      # went out at 9.09 Hz. It matched the 9.09 Hz measured on the robot's own
+      # deployed node, so this was production behaviour, not a replay artifact.
+      #
+      # The effective rate quantises to update_frequency divided by whole cycles:
+      #   publish 10 -> 100 ms gate / 66.7 ms loop = 1.5 -> every 2nd cycle -> 7.50 Hz
+      #   publish 15 -> 1.0, on the boundary                              -> 9.09 Hz
+      #   publish 30 -> 0.5 -> every cycle                                -> 14.96 Hz
+      # Asking for 10 Hz yields 7.5; the gate cannot give a rate the loop cannot reach.
+      #
+      # So the ceiling is update_frequency, and 20 Hz needs the loop itself raised to
+      # 20 -- publish_frequency alone caps out at 15. Measured at 20/40: loop 20.00 Hz,
+      # gate 188/188, grid 20.005 Hz. 40 rather than 25 only to sit far from the
+      # boundary; anything above 20 works.
+      #
+      # The cost is budget, not CPU. update_frequency 20 shrinks the per-cycle budget
+      # from 66.7 to 50 ms, which this layer fits easily since 2d2a170 (mean 3.0 ms,
+      # p95 4.3, max 13.0 on the camera bag) but the pre-patch code would not (max
+      # 45.1 ms, 90% of the budget). Publishing itself is close to free: 8.8 -> 20.0 Hz
+      # moved the node from 41.0% to 41.4% of a core.
+      update_frequency: 20.0
+      publish_frequency: 40.0
       always_send_full_costmap: true
       # Master-level, distinct from the stvl_layer copy below: Costmap2DROS reads
       # this one to choose the master grid's default value. Without it the master
@@ -21,12 +51,26 @@ costmap:
       track_unknown_space: false
 
       rolling_window: true
-      # 14 m, not 16: the planner resamples this into a robot-centred 10x10 m window
-      # that rotates with the robot, so an axis-aligned costmap needs 10*sqrt(2) =
-      # 14.14 m to cover it at any heading. 14 clips only the extreme diagonal
-      # corners by 7 cm while dropping 23% of the cells (160k -> 122k).
-      width: 14
-      height: 14
+      # 18 m. The 14 above rested on the planner window being robot-CENTRED, and it is
+      # not. planner_yn.cpp:856,859 build a 500x500 px window at m2pixel 50 (0.02 m/px,
+      # so 10 x 10 m) with robot_on_grid = (250, 350) -- not (250, 250). Reading that
+      # through the CoNA pixel convention (row = gcy - k*x_rel, x_rel forward) the window
+      # reaches 7.00 m ahead, 2.98 m behind and 5.00 m to each side: it looks forward.
+      #
+      # So the corner farthest from the robot is the front one, sqrt(7.0^2 + 5.0^2) =
+      # 8.60 m, and the window rotates with the heading, so an axis-aligned costmap has
+      # to carry half-extent 8.60 m -- 17.2 m square -- to cover it at every heading.
+      # At 14 (half-extent 7.0) the front corners leave the costmap by up to 1.60 m near
+      # 45-degree headings, and getLocalCostmap's warpAffine fills what it cannot read
+      # with BORDER_CONSTANT 125, unobserved (cona_bridge.cpp:229). That is the hole seen
+      # in the local planner image on the gochuck bags. 18 covers 8.60 with 0.40 to spare.
+      #
+      # The cost is cells, not voxels: obstacle_range bounds the voxel count and is
+      # unchanged, while worldToMap stops rejecting the ones that were being computed and
+      # thrown away. 350^2 = 122,500 -> 450^2 = 202,500 cells for resetMaps,
+      # updateWithOverwrite and the published grid.
+      width: 18
+      height: 18
       resolution: 0.04
 
       # Chassis is 0.80 x 0.70 (half 0.40 x 0.35); this polygon is one voxel (0.04)

@@ -40,6 +40,7 @@
 #include <string>
 #include <unordered_map>
 #include <memory>
+#include <algorithm>
 #include <vector>
 
 #include "spatio_temporal_voxel_layer/spatio_temporal_voxel_layer.hpp"
@@ -786,31 +787,49 @@ void SpatioTemporalVoxelLayer::updateCosts(
 
 /*****************************************************************************/
 void SpatioTemporalVoxelLayer::UpdateROSCostmap(
-  double * min_x, double * min_y, double * max_x, double * max_y,
-  std::unordered_set<volume_grid::occupany_cell> & cleared_cells)
+  double * min_x, double * min_y, double * max_x, double * max_y)
 /*****************************************************************************/
 {
   // grabs map of occupied cells from grid and adds to costmap_
   Costmap2D::resetMaps();
 
-  std::unordered_map<volume_grid::occupany_cell, uint>::iterator it;
-  for (it = _voxel_grid->GetFlattenedCostmap()->begin();
-    it != _voxel_grid->GetFlattenedCostmap()->end(); ++it)
-  {
-    uint map_x, map_y;
-    if (static_cast<int>(it->second) >= _mark_threshold &&
-      worldToMap(it->first.x, it->first.y, map_x, map_y))
-    {
-      costmap_[getIndex(map_x, map_y)] = nav2_costmap_2d::LETHAL_OBSTACLE;
-      touch(it->first.x, it->first.y, min_x, min_y, max_x, max_y);
+  // The grid has already counted each voxel into this window's cells and dropped anything
+  // outside it, so this is a straight scan: no hashing, no worldToMap, and the index is
+  // the loop counter.
+  const std::vector<uint16_t> & columns = _voxel_grid->GetFlattenedCostmap();
+  const size_t cells = static_cast<size_t>(size_x_) * static_cast<size_t>(size_y_);
+  if (columns.size() == cells) {
+    const uint16_t threshold = static_cast<uint16_t>(std::max(_mark_threshold, 0));
+    for (size_t i = 0; i < cells; ++i) {
+      if (columns[i] >= threshold && columns[i] > 0) {
+        costmap_[i] = nav2_costmap_2d::LETHAL_OBSTACLE;
+      }
     }
   }
 
-  std::unordered_set<volume_grid::occupany_cell>::iterator cell;
-  for (cell = cleared_cells.begin(); cell != cleared_cells.end(); ++cell)
-  {
-    touch(cell->x, cell->y, min_x, min_y, max_x, max_y);
-  }
+  // The whole window is dirty, every cycle.
+  //
+  // This is not laziness about bounds, it is what clearing requires. resetMaps() has just
+  // wiped this layer's grid, so any cell that went from lethal to free this cycle is only
+  // carried into the master by updateCosts(), and updateCosts() writes nothing outside
+  // these bounds. The old code got there by touching every individual cleared voxel,
+  // which meant building a hash set of tens of thousands of cells per cycle purely to
+  // recover a rectangle. Declaring the window is a strict superset of that rectangle and
+  // costs two calls.
+  //
+  // The extra work this hands updateWithOverwrite is bounded and small: the layer window
+  // is rolling and the robot is moving, so the touched region was already most of the
+  // window on a typical cycle.
+  //
+  // It does sharpen one existing hazard. With combination_method 0 this layer overwrites
+  // the master, and it now does so across the whole window rather than a sub-rectangle,
+  // so a layer ordered BEFORE stvl_layer is wiped completely instead of partially. The
+  // plugin order already had to put stvl_layer first for exactly this reason; this makes
+  // getting it wrong fail loudly instead of subtly.
+  const double window_max_x = origin_x_ + size_x_ * resolution_;
+  const double window_max_y = origin_y_ + size_y_ * resolution_;
+  touch(origin_x_, origin_y_, min_x, min_y, max_x, max_y);
+  touch(window_max_x, window_max_y, min_x, min_y, max_x, max_y);
 }
 
 /*****************************************************************************/
@@ -840,6 +859,11 @@ void SpatioTemporalVoxelLayer::updateBounds(
       robot_y - getSizeInMetersY() / 2);
   }
 
+  // Hand the (possibly just moved) window to the grid before anything reads voxels, so
+  // the flattening below counts into the same cells this layer is about to publish.
+  _voxel_grid->SetCostmapWindow(
+    origin_x_, origin_y_, resolution_, size_x_, size_y_);
+
   useExtraBounds(min_x, min_y, max_x, max_y);
 
   bool current = true;
@@ -850,8 +874,6 @@ void SpatioTemporalVoxelLayer::updateBounds(
   ObservationsResetAfterReading();
   current_ = current;
 
-  std::unordered_set<volume_grid::occupany_cell> cleared_cells;
-
   // navigation mode: clear observations, mapping mode: save maps and publish
   bool should_save = false;
   auto node = node_.lock();
@@ -859,7 +881,7 @@ void SpatioTemporalVoxelLayer::updateBounds(
     should_save = node->now() - _last_map_save_time > *_map_save_duration;
   }
   if (!_mapping_mode) {
-    _voxel_grid->ClearFrustums(clearing_observations, cleared_cells);
+    _voxel_grid->ClearFrustums(clearing_observations);
   } else if (should_save) {
     _last_map_save_time = node->now();
     time_t rawtime;
@@ -881,7 +903,7 @@ void SpatioTemporalVoxelLayer::updateBounds(
   _voxel_grid->Mark(marking_observations);
 
   // update the ROS Layered Costmap
-  UpdateROSCostmap(min_x, min_y, max_x, max_y, cleared_cells);
+  UpdateROSCostmap(min_x, min_y, max_x, max_y);
 
   // publish point cloud in navigation mode
   if (_publish_voxels && !_mapping_mode) {
