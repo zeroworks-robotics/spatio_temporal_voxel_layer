@@ -12,8 +12,38 @@ costmap:
       # only so the two values stop reading as if they disagreed.
       transform_tolerance: 1.0
 
-      update_frequency: 15.0
-      publish_frequency: 15.0
+      # publish_frequency must stay strictly above update_frequency, and that is the
+      # whole reason these are 20/40 rather than 20/20.
+      #
+      # mapUpdateLoop publishes only when last_publish_ + publish_cycle_ < now(), and
+      # on a publish it resets last_publish_ to now() rather than advancing it by
+      # publish_cycle_. Phase error therefore never accumulates: every cycle has to
+      # independently clear a full publish_cycle_ measured from the last actual
+      # publish. Set the two frequencies equal and the gate period lands exactly on the
+      # loop period, so the comparison sits on its boundary and jitter decides -- about
+      # 35% of cycles simply lose. That is what the old 15/15 was doing: the loop ran at
+      # a measured 15.00 Hz, the gate opened on 97 of 149 cycles, and /costmap/costmap
+      # went out at 9.09 Hz. It matched the 9.09 Hz measured on the robot's own
+      # deployed node, so this was production behaviour, not a replay artifact.
+      #
+      # The effective rate quantises to update_frequency divided by whole cycles:
+      #   publish 10 -> 100 ms gate / 66.7 ms loop = 1.5 -> every 2nd cycle -> 7.50 Hz
+      #   publish 15 -> 1.0, on the boundary                              -> 9.09 Hz
+      #   publish 30 -> 0.5 -> every cycle                                -> 14.96 Hz
+      # Asking for 10 Hz yields 7.5; the gate cannot give a rate the loop cannot reach.
+      #
+      # So the ceiling is update_frequency, and 20 Hz needs the loop itself raised to
+      # 20 -- publish_frequency alone caps out at 15. Measured at 20/40: loop 20.00 Hz,
+      # gate 188/188, grid 20.005 Hz. 40 rather than 25 only to sit far from the
+      # boundary; anything above 20 works.
+      #
+      # The cost is budget, not CPU. update_frequency 20 shrinks the per-cycle budget
+      # from 66.7 to 50 ms, which this layer fits easily since 2d2a170 (mean 3.0 ms,
+      # p95 4.3, max 13.0 on the camera bag) but the pre-patch code would not (max
+      # 45.1 ms, 90% of the budget). Publishing itself is close to free: 8.8 -> 20.0 Hz
+      # moved the node from 41.0% to 41.4% of a core.
+      update_frequency: 20.0
+      publish_frequency: 40.0
       always_send_full_costmap: true
       # Master-level, distinct from the stvl_layer copy below: Costmap2DROS reads
       # this one to choose the master grid's default value. Without it the master
