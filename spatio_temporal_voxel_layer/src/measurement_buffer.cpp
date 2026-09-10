@@ -41,6 +41,10 @@
 #include "spatio_temporal_voxel_layer/measurement_buffer.hpp"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 #include "tf2_sensor_msgs/tf2_sensor_msgs.hpp"
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <utility>
 
 namespace buffer
 {
@@ -62,6 +66,8 @@ MeasurementBuffer::MeasurementBuffer(
   const int & voxel_min_points, const bool & enabled,
   const bool & clear_buffer_after_reading, const ModelType & model_type,
   const std::string & height_filter_frame,
+  const bool & ground_relative_height, const double & ground_max_grade_deg,
+  const double & ground_height_tol,
   rclcpp::Clock::SharedPtr clock, rclcpp::Logger logger)
 : _buffer(tf),
   _observation_keep_time(rclcpp::Duration::from_seconds(observation_keep_time)),
@@ -77,7 +83,11 @@ MeasurementBuffer::MeasurementBuffer(
   _filter(filter), _voxel_min_points(voxel_min_points),
   _clear_buffer_after_reading(clear_buffer_after_reading),
   _enabled(enabled), _model_type(model_type),
-  _height_filter_frame(height_filter_frame), clock_(clock), logger_(logger)
+  _height_filter_frame(height_filter_frame),
+  _ground_relative_height(ground_relative_height),
+  _ground_max_grade_deg(ground_max_grade_deg),
+  _ground_height_tol(ground_height_tol),
+  clock_(clock), logger_(logger)
 /*****************************************************************************/
 {
 }
@@ -86,6 +96,134 @@ MeasurementBuffer::MeasurementBuffer(
 MeasurementBuffer::~MeasurementBuffer(void)
 /*****************************************************************************/
 {
+}
+
+/*****************************************************************************/
+bool MeasurementBuffer::FilterGroundRelative(point_cloud_ptr & cld) const
+/*****************************************************************************/
+{
+  // `cld` is organized and already in _height_filter_frame, whose z is up and whose
+  // z ~ 0 is the plane the robot stands on. Both facts are what let the column walk
+  // mean anything, and neither is checked here -- the caller establishes them.
+  const std::size_t n = static_cast<std::size_t>(cld->width) * cld->height;
+
+  sensor_msgs::PointCloud2ConstIterator<float> ix(*cld, "x");
+  sensor_msgs::PointCloud2ConstIterator<float> iy(*cld, "y");
+  sensor_msgs::PointCloud2ConstIterator<float> iz(*cld, "z");
+
+  std::vector<ground_seg::GroundPoint> pts(n);
+  for (std::size_t i = 0; i < n; ++i, ++ix, ++iy, ++iz) {
+    const float x = *ix, y = *iy, z = *iz;
+    // A missing pixel reaches us as exactly (0,0,0), not as NaN, on this robot's Gemini
+    // driver -- about 15% of every frame, with is_dense already false. Left in, those
+    // all transform to the camera's own origin and read as a floor sample directly
+    // under the robot, which is both wrong and exactly where a wrong sample does most
+    // damage. Measured on the loc_bag_drive frames; NaN is handled too, for drivers
+    // that use it.
+    const bool ok = std::isfinite(x) && std::isfinite(y) && std::isfinite(z) &&
+      !(x == 0.0f && y == 0.0f && z == 0.0f);
+    pts[i] = {x, y, z, ok};
+  }
+
+  ground_seg::GroundColumnsConfig cfg;
+  cfg.max_grade_deg = static_cast<float>(_ground_max_grade_deg);
+  cfg.height_tol = static_cast<float>(_ground_height_tol);
+  // The band this layer is configured with is what the walk should consider "not floor",
+  // so the two stay in step instead of being tuned against each other.
+  cfg.max_ground_z = static_cast<float>(_max_obstacle_height);
+
+  const ground_seg::GroundColumnsResult seg =
+    ground_seg::segment_ground_columns(pts, cld->width, cld->height, cfg);
+  if (seg.classes.size() != n) {
+    return false;
+  }
+
+  // A column that never found floor cannot say how high anything in it is. Falling back
+  // to the fixed band for those columns rather than dropping them: not knowing where the
+  // floor is, is not a reason to stop reporting obstacles.
+  std::vector<uint8_t> unseeded(cld->width, 0u);
+  for (std::size_t u = 0; u < seg.column_ground.size(); ++u) {
+    unseeded[u] = seg.column_ground[u].empty() ? 1u : 0u;
+  }
+
+  std::vector<float> keep;
+  keep.reserve(n * 3);
+  sensor_msgs::PointCloud2ConstIterator<float> jx(*cld, "x");
+  sensor_msgs::PointCloud2ConstIterator<float> jy(*cld, "y");
+  sensor_msgs::PointCloud2ConstIterator<float> jz(*cld, "z");
+  for (std::size_t i = 0; i < n; ++i, ++jx, ++jy, ++jz) {
+    if (!pts[i].valid) {
+      continue;
+    }
+    // Ground and holes are never obstacles. Dropping HOLE here is deliberate and is not
+    // the same as ignoring a drop-off: a hole is an absence of floor, and turning it
+    // into a lethal cell would put a wall at the top of every staircase. Detecting the
+    // drop itself is a separate job from marking obstacles.
+    const ground_seg::GroundClass c = seg.classes[i];
+    if (c == ground_seg::GroundClass::GROUND || c == ground_seg::GroundClass::HOLE) {
+      continue;
+    }
+
+    const std::size_t u = i % cld->width;
+    float base = 0.0f;
+    if (!unseeded[u]) {
+      const float range = std::sqrt((*jx) * (*jx) + (*jy) * (*jy));
+      base = NearestGroundZ(seg.column_ground[u], range);
+    }
+    const float h = *jz - base;
+    if (h < _min_obstacle_height || h > _max_obstacle_height) {
+      continue;
+    }
+    keep.push_back(*jx);
+    keep.push_back(*jy);
+    keep.push_back(*jz);
+  }
+
+  // Rebuild as an unorganized cloud of survivors. The organization has served its
+  // purpose by this point and everything downstream treats the cloud as a bag of points.
+  point_cloud_ptr out(new sensor_msgs::msg::PointCloud2());
+  out->header = cld->header;
+  sensor_msgs::PointCloud2Modifier mod(*out);
+  mod.setPointCloud2FieldsByString(1, "xyz");
+  mod.resize(keep.size() / 3);
+  sensor_msgs::PointCloud2Iterator<float> ox(*out, "x");
+  sensor_msgs::PointCloud2Iterator<float> oy(*out, "y");
+  sensor_msgs::PointCloud2Iterator<float> oz(*out, "z");
+  for (std::size_t k = 0; k + 2 < keep.size(); k += 3, ++ox, ++oy, ++oz) {
+    *ox = keep[k];
+    *oy = keep[k + 1];
+    *oz = keep[k + 2];
+  }
+  out->is_dense = true;
+  cld.swap(out);
+  return true;
+}
+
+/*****************************************************************************/
+float MeasurementBuffer::NearestGroundZ(
+  const std::vector<std::pair<float, float>> & profile, const float & range)
+/*****************************************************************************/
+{
+  // The profile is ascending in range (segment_ground_columns walks near to far), so
+  // this is a binary search for the nearer of the two samples bracketing `range`.
+  // Beyond either end the nearest sample is the best estimate available; extrapolating
+  // a slope past the last floor actually seen would invent ground where the walk
+  // deliberately stopped.
+  if (profile.empty()) {
+    return 0.0f;
+  }
+  std::vector<std::pair<float, float>>::const_iterator it =
+    std::lower_bound(
+    profile.begin(), profile.end(), range,
+    [](const std::pair<float, float> & a, const float & r) {return a.first < r;});
+  if (it == profile.begin()) {
+    return profile.front().second;
+  }
+  if (it == profile.end()) {
+    return profile.back().second;
+  }
+  std::vector<std::pair<float, float>>::const_iterator pr = it - 1;
+  return (range - pr->first <= it->first - range) ? pr->second : it->second;
 }
 
 /*****************************************************************************/
@@ -162,8 +300,37 @@ void MeasurementBuffer::BufferROSCloud(
       tf2_ros::fromMsg(cloud.header.stamp));
     tf2::doTransform(cloud, *cld_global, tf_stamped);
 
+    // Ground-relative height gating. Replaces the fixed band below with the same band
+    // measured from the ground found under each point, so a ramp's own surface is
+    // ground rather than a 0.5 m obstacle. Runs here because this is the last point at
+    // which the cloud is still ORGANIZED -- tf2::doTransform preserves width/height,
+    // whereas the PCL filters that follow do not -- and the column walk needs that.
+    //
+    // It rewrites cld_global into an unorganized cloud of surviving points, then hands
+    // the fixed band a range wide enough to be inert so the VoxelGrid below only
+    // downsamples. Points are otherwise untouched: the gate decides membership, it does
+    // not move anything.
+    bool ground_gated = false;
+    if (_ground_relative_height) {
+      if (cld_global->height <= 1) {
+        RCLCPP_WARN_ONCE(
+          logger_,
+          "%s: ground_relative_height needs an organized cloud; %s is %ux%u. "
+          "Falling back to the fixed obstacle-height band.",
+          _source_name.c_str(), _topic_name.c_str(), cld_global->width, cld_global->height);
+      } else {
+        ground_gated = FilterGroundRelative(cld_global);
+      }
+    }
+
     pcl::PCLPointCloud2::Ptr cloud_pcl(new pcl::PCLPointCloud2());
     pcl::PCLPointCloud2::Ptr cloud_filtered(new pcl::PCLPointCloud2());
+
+    // Already gated above; leave the band open so the filters only downsample.
+    const double band_min = ground_gated ? -std::numeric_limits<double>::infinity()
+                                         : _min_obstacle_height;
+    const double band_max = ground_gated ? std::numeric_limits<double>::infinity()
+                                         : _max_obstacle_height;
 
     // remove points that are below or above our height restrictions, and
     // in the same time, remove NaNs and if user wants to use it, combine with a
@@ -172,7 +339,7 @@ void MeasurementBuffer::BufferROSCloud(
       pcl::VoxelGrid<pcl::PCLPointCloud2> sor;
       sor.setInputCloud(cloud_pcl);
       sor.setFilterFieldName("z");
-      sor.setFilterLimits(_min_obstacle_height, _max_obstacle_height);
+      sor.setFilterLimits(band_min, band_max);
       sor.setDownsampleAllData(false);
       float v_s = static_cast<float>(_voxel_size);
       sor.setLeafSize(v_s, v_s, v_s);
@@ -185,8 +352,7 @@ void MeasurementBuffer::BufferROSCloud(
       pass_through_filter.setInputCloud(cloud_pcl);
       pass_through_filter.setKeepOrganized(false);
       pass_through_filter.setFilterFieldName("z");
-      pass_through_filter.setFilterLimits(
-        _min_obstacle_height, _max_obstacle_height);
+      pass_through_filter.setFilterLimits(band_min, band_max);
       pass_through_filter.filter(*cloud_filtered);
       pcl_conversions::fromPCL(*cloud_filtered, *cld_global);
     }

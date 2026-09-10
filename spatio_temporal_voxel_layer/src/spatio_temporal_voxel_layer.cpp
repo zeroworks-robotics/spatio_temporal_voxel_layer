@@ -248,6 +248,8 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
     double min_z, max_z, vFOV, vFOVPadding;
     double hFOV, decay_acceleration, obstacle_range;
     std::string topic, sensor_frame, data_type, filter_str, height_filter_frame;
+    bool ground_relative_height;
+    double ground_max_grade_deg, ground_height_tol;
     bool inf_is_valid = false, clearing, marking;
     bool clear_after_reading, enabled;
     int voxel_min_points;
@@ -273,6 +275,13 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
     declareParameter(source + "." + "vertical_fov_padding", rclcpp::ParameterValue(0.0));
     declareParameter(source + "." + "horizontal_fov_angle", rclcpp::ParameterValue(1.04));
     declareParameter(source + "." + "decay_acceleration", rclcpp::ParameterValue(0.0));
+    // Measure min/max_obstacle_height from the ground under each point instead of from
+    // height_filter_frame's origin, so a ramp's surface is not read as a 0.5 m obstacle.
+    // Off by default: it changes what this source marks, and it needs an organized
+    // cloud (the five depth cameras give one; a LaserScan source never will).
+    declareParameter(source + "." + "ground_relative_height", rclcpp::ParameterValue(false));
+    declareParameter(source + "." + "ground_max_grade_deg", rclcpp::ParameterValue(20.0));
+    declareParameter(source + "." + "ground_height_tol", rclcpp::ParameterValue(0.10));
     declareParameter(source + "." + "filter", rclcpp::ParameterValue(std::string("passthrough")));
     declareParameter(source + "." + "voxel_min_points", rclcpp::ParameterValue(0));
     declareParameter(source + "." + "clear_after_reading", rclcpp::ParameterValue(false));
@@ -290,6 +299,12 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
     node->get_parameter(name_ + "." + source + "." + "sensor_frame", sensor_frame);
     node->get_parameter(
       name_ + "." + source + "." + "height_filter_frame", height_filter_frame);
+    node->get_parameter(
+      name_ + "." + source + "." + "ground_relative_height", ground_relative_height);
+    node->get_parameter(
+      name_ + "." + source + "." + "ground_max_grade_deg", ground_max_grade_deg);
+    node->get_parameter(
+      name_ + "." + source + "." + "ground_height_tol", ground_height_tol);
     node->get_parameter(
       name_ + "." + source + "." + "observation_persistence",
       observation_keep_time);
@@ -356,6 +371,7 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
           decay_acceleration, marking, clearing, _voxel_size,
           filter, voxel_min_points, enabled, clear_after_reading, model_type,
           height_filter_frame,
+          ground_relative_height, ground_max_grade_deg, ground_height_tol,
           node->get_clock(), node->get_logger())));
 
     // Add buffer to marking observation buffers

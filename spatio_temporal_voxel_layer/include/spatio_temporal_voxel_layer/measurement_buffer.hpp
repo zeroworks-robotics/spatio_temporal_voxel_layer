@@ -47,6 +47,7 @@
 #include <memory>
 // measurement structs
 #include "spatio_temporal_voxel_layer/measurement_reading.h"
+#include "spatio_temporal_voxel_layer/ground_columns.hpp"
 // PCL
 #include "pcl/common/transforms.h"
 #include "pcl/filters/voxel_grid.h"
@@ -111,6 +112,8 @@ public:
     const bool & clear_buffer_after_reading,
     const ModelType & model_type,
     const std::string & height_filter_frame,
+    const bool & ground_relative_height, const double & ground_max_grade_deg,
+    const double & ground_height_tol,
     rclcpp::Clock::SharedPtr clock,
     rclcpp::Logger logger);
 
@@ -169,7 +172,21 @@ private:
   // Frame the min/max_obstacle_height band is measured in. Empty means the global frame,
   // which is the upstream behaviour; naming base_link ties the band to the chassis so it
   // tilts with the robot on a ramp instead of staying level with the world.
+  // Drop ground and hole points and gate the rest on height above the ground beneath
+  // them. Returns false if it could not run, leaving `cld` untouched.
+  bool FilterGroundRelative(point_cloud_ptr & cld) const;
+  // Ground height at `range` from an ascending (range, z) profile.
+  static float NearestGroundZ(
+    const std::vector<std::pair<float, float>> & profile, const float & range);
+
   std::string _height_filter_frame;
+  // When true, min/max_obstacle_height are measured from the ground found beneath each
+  // point rather than from _height_filter_frame's origin. See the ramp note in
+  // ground_columns.hpp; requires an ORGANIZED cloud and falls back to the fixed band
+  // with a warning when it does not get one.
+  bool _ground_relative_height;
+  double _ground_max_grade_deg;
+  double _ground_height_tol;
   rclcpp::Clock::SharedPtr clock_;
   rclcpp::Logger logger_;
 };
