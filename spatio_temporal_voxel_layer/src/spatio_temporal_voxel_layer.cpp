@@ -238,6 +238,9 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
 
   matchSize();
 
+  // One reference for the whole layer, so the buffers created below share it.
+  _ground_reference = std::make_shared<ground_seg::GroundReference>();
+
   RCLCPP_INFO(logger_, "%s created underlying voxel grid.", getName().c_str());
 
   std::stringstream ss(_topics_string);
@@ -249,7 +252,8 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
     double hFOV, decay_acceleration, obstacle_range;
     std::string topic, sensor_frame, data_type, filter_str, height_filter_frame;
     bool ground_relative_height;
-    double ground_max_grade_deg, ground_height_tol;
+    double ground_max_grade_deg, ground_height_tol, ground_height_tol_per_m;
+    bool ground_reference_publish, ground_reference_use;
     bool inf_is_valid = false, clearing, marking;
     bool clear_after_reading, enabled;
     int voxel_min_points;
@@ -281,7 +285,13 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
     // cloud (the five depth cameras give one; a LaserScan source never will).
     declareParameter(source + "." + "ground_relative_height", rclcpp::ParameterValue(false));
     declareParameter(source + "." + "ground_max_grade_deg", rclcpp::ParameterValue(20.0));
-    declareParameter(source + "." + "ground_height_tol", rclcpp::ParameterValue(0.10));
+    declareParameter(source + "." + "ground_height_tol", rclcpp::ParameterValue(0.02));
+    declareParameter(source + "." + "ground_height_tol_per_m", rclcpp::ParameterValue(0.01));
+    // Share a floor height between cameras. A camera that sees flat ground beneath the
+    // robot publishes; one whose near field is already sloped -- front, whose nearest
+    // floor is 1.52 m out -- uses it to seed. See ground_reference.hpp.
+    declareParameter(source + "." + "ground_reference_publish", rclcpp::ParameterValue(false));
+    declareParameter(source + "." + "ground_reference_use", rclcpp::ParameterValue(false));
     declareParameter(source + "." + "filter", rclcpp::ParameterValue(std::string("passthrough")));
     declareParameter(source + "." + "voxel_min_points", rclcpp::ParameterValue(0));
     declareParameter(source + "." + "clear_after_reading", rclcpp::ParameterValue(false));
@@ -305,6 +315,12 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
       name_ + "." + source + "." + "ground_max_grade_deg", ground_max_grade_deg);
     node->get_parameter(
       name_ + "." + source + "." + "ground_height_tol", ground_height_tol);
+    node->get_parameter(
+      name_ + "." + source + "." + "ground_height_tol_per_m", ground_height_tol_per_m);
+    node->get_parameter(
+      name_ + "." + source + "." + "ground_reference_publish", ground_reference_publish);
+    node->get_parameter(
+      name_ + "." + source + "." + "ground_reference_use", ground_reference_use);
     node->get_parameter(
       name_ + "." + source + "." + "observation_persistence",
       observation_keep_time);
@@ -372,6 +388,8 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
           filter, voxel_min_points, enabled, clear_after_reading, model_type,
           height_filter_frame,
           ground_relative_height, ground_max_grade_deg, ground_height_tol,
+          ground_height_tol_per_m,
+          ground_reference_publish, ground_reference_use, _ground_reference,
           node->get_clock(), node->get_logger())));
 
     // Add buffer to marking observation buffers

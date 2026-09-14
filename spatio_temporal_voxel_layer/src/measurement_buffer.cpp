@@ -40,6 +40,7 @@
 #include <vector>
 #include "spatio_temporal_voxel_layer/measurement_buffer.hpp"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
+#include "geometry_msgs/msg/point_stamped.hpp"
 #include "tf2_sensor_msgs/tf2_sensor_msgs.hpp"
 #include <algorithm>
 #include <cmath>
@@ -67,7 +68,9 @@ MeasurementBuffer::MeasurementBuffer(
   const bool & clear_buffer_after_reading, const ModelType & model_type,
   const std::string & height_filter_frame,
   const bool & ground_relative_height, const double & ground_max_grade_deg,
-  const double & ground_height_tol,
+  const double & ground_height_tol, const double & ground_height_tol_per_m,
+  const bool & ground_reference_publish, const bool & ground_reference_use,
+  std::shared_ptr<ground_seg::GroundReference> ground_reference,
   rclcpp::Clock::SharedPtr clock, rclcpp::Logger logger)
 : _buffer(tf),
   _observation_keep_time(rclcpp::Duration::from_seconds(observation_keep_time)),
@@ -87,6 +90,10 @@ MeasurementBuffer::MeasurementBuffer(
   _ground_relative_height(ground_relative_height),
   _ground_max_grade_deg(ground_max_grade_deg),
   _ground_height_tol(ground_height_tol),
+  _ground_height_tol_per_m(ground_height_tol_per_m),
+  _ground_reference_publish(ground_reference_publish),
+  _ground_reference_use(ground_reference_use),
+  _ground_reference(ground_reference),
   clock_(clock), logger_(logger)
 /*****************************************************************************/
 {
@@ -114,11 +121,11 @@ bool MeasurementBuffer::FilterGroundRelative(point_cloud_ptr & cld) const
   std::vector<ground_seg::GroundPoint> pts(n);
   for (std::size_t i = 0; i < n; ++i, ++ix, ++iy, ++iz) {
     const float x = *ix, y = *iy, z = *iz;
-    // A missing pixel reaches us as exactly (0,0,0), not as NaN, on this robot's Gemini
+    // A missing pixel reaches us as exactly (0,0,0), not as NaN, on this robot's depth
     // driver -- about 15% of every frame, with is_dense already false. Left in, those
     // all transform to the camera's own origin and read as a floor sample directly
     // under the robot, which is both wrong and exactly where a wrong sample does most
-    // damage. Measured on the loc_bag_drive frames; NaN is handled too, for drivers
+    // damage. Measured on real recorded frames; NaN is handled too, for drivers
     // that use it.
     const bool ok = std::isfinite(x) && std::isfinite(y) && std::isfinite(z) &&
       !(x == 0.0f && y == 0.0f && z == 0.0f);
@@ -128,14 +135,82 @@ bool MeasurementBuffer::FilterGroundRelative(point_cloud_ptr & cld) const
   ground_seg::GroundColumnsConfig cfg;
   cfg.max_grade_deg = static_cast<float>(_ground_max_grade_deg);
   cfg.height_tol = static_cast<float>(_ground_height_tol);
+  cfg.height_tol_per_m = static_cast<float>(_ground_height_tol_per_m);
   // The band this layer is configured with is what the walk should consider "not floor",
   // so the two stay in step instead of being tuned against each other.
   cfg.max_ground_z = static_cast<float>(_max_obstacle_height);
 
+  // Seeding may consult what the other cameras have seen. Only the seed uses it; the walk
+  // that follows is still this camera's own observation.
+  // The grid lives in the global frame (odom); the walk works in the filter frame
+  // (base_link). Both transforms are already available, and the round trip is two 3x3
+  // multiplies per lookup, which is why the grid is consulted only at seeding.
+  ground_seg::GroundSeedReference seed_ref;
+  const double now = clock_->now().seconds();
+  geometry_msgs::msg::TransformStamped f2g;
+  bool have_f2g = false;
+  if ((_ground_reference_use || _ground_reference_publish) && _ground_reference) {
+    try {
+      f2g = _buffer.lookupTransform(
+        _global_frame, _height_filter_frame, tf2_ros::fromMsg(cld->header.stamp));
+      have_f2g = true;
+    } catch (tf2::TransformException &) {
+      have_f2g = false;   // no grid this frame; the walk seeds on its own as before
+    }
+  }
+  if (have_f2g && _ground_reference_use) {
+    std::shared_ptr<ground_seg::GroundReference> ref = _ground_reference;
+    const geometry_msgs::msg::TransformStamped tf = f2g;
+    seed_ref = [ref, tf, now](float x, float y, float & z) {
+        geometry_msgs::msg::PointStamped in, out;
+        in.point.x = x; in.point.y = y; in.point.z = 0.0;
+        tf2::doTransform(in, out, tf);
+        float gz;
+        if (!ref->Lookup(
+            static_cast<float>(out.point.x), static_cast<float>(out.point.y), now, gz))
+        {
+          return false;
+        }
+        // The grid answers in odom; the caller is asking in the filter frame, and only
+        // the height differs between them on this robot. Subtracting the frame's own
+        // height converts it back.
+        z = gz - static_cast<float>(tf.transform.translation.z);
+        return true;
+      };
+  
+  }
+
   const ground_seg::GroundColumnsResult seg =
-    ground_seg::segment_ground_columns(pts, cld->width, cld->height, cfg);
+    ground_seg::segment_ground_columns(pts, cld->width, cld->height, cfg, seed_ref);
   if (seg.classes.size() != n) {
     return false;
+  }
+
+  if (_ground_reference_publish && _ground_reference && have_f2g) {
+    // Only columns that seeded from their own view are published. A column seeded FROM the
+    // grid writing its own result back would let the estimate drift with nothing holding
+    // it to an observation.
+    std::vector<std::pair<float, float>> xy;
+    std::vector<float> gz;
+    xy.reserve(n / 8);
+    gz.reserve(n / 8);
+    for (std::size_t i = 0; i < n; ++i) {
+      if (!pts[i].valid || seg.classes[i] != ground_seg::GroundClass::GROUND) {
+        continue;
+      }
+      const std::size_t u = i % cld->width;
+      if (u >= seg.column_native_seed.size() || !seg.column_native_seed[u]) {
+        continue;
+      }
+      geometry_msgs::msg::PointStamped in, out;
+      in.point.x = pts[i].x; in.point.y = pts[i].y; in.point.z = pts[i].z;
+      tf2::doTransform(in, out, f2g);
+      xy.emplace_back(static_cast<float>(out.point.x), static_cast<float>(out.point.y));
+      gz.push_back(static_cast<float>(out.point.z));
+    }
+    _ground_reference->Recenter(
+      f2g.transform.translation.x, f2g.transform.translation.y);
+    _ground_reference->Publish(xy, gz, now);
   }
 
   // A column that never found floor cannot say how high anything in it is. Falling back

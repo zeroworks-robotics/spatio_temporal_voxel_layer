@@ -53,6 +53,7 @@
 #include <unordered_map>
 // voxel grid
 #include "spatio_temporal_voxel_layer/spatio_temporal_voxel_grid.hpp"
+#include "spatio_temporal_voxel_layer/ground_reference.hpp"
 // ROS
 #include "rclcpp/rclcpp.hpp"
 #include "rcl_interfaces/msg/set_parameters_result.hpp"
@@ -197,6 +198,8 @@ private:
   std::vector<geometry_msgs::msg::Point> _transformed_footprint;
   std::vector<observation::MeasurementReading> _static_observations;
   std::unique_ptr<volume_grid::SpatioTemporalVoxelGrid> _voxel_grid;
+  // One per layer, handed to every buffer. See ground_reference.hpp.
+  std::shared_ptr<ground_seg::GroundReference> _ground_reference;
   boost::recursive_mutex _voxel_grid_lock;
 
   std::string _topics_string;

@@ -46,6 +46,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <functional>
 #include <cstddef>
 #include <limits>
 #include <utility>
@@ -60,7 +62,8 @@ struct GroundColumnsConfig
 	// A column starts from the pixels nearest the robot, which for a downward-tilted
 	// camera are at the bottom of the image and are floor unless the robot is nose to
 	// nose with something. A sample seeds the run when it lies within this band of the
-	// robot's own standing plane (z = 0). Wide enough for the near floor to be found
+	// expected floor -- the robot's own standing plane (z = 0) unless a seed_reference is
+	// supplied, in which case the height that reference gives for the sample's position. Wide enough for the near floor to be found
 	// under sensor noise and a little pitch; tight enough that a box right in front of
 	// the camera cannot become the seed.
 	float seed_z_tol = 0.10f;
@@ -84,15 +87,20 @@ struct GroundColumnsConfig
 	// accepted run. Absorbs depth noise, which grows with distance, hence the second
 	// term: tolerance is height_tol + height_tol_per_m * range.
 	//
-	// This is the parameter to fit first on real data, and it is not a safety margin to
-	// be minimised -- it is a noise budget, and setting it below the sensor's actual
-	// noise silently shreds the floor. Measured on synthetic scenes at the fdown rig,
-	// flat-floor ground recall against per-point sigma: 0.06 holds 100% at sigma 2 mm
-	// but only 86% at 1 cm and 37% at 2 cm, while 0.08 holds 98% at 1 cm. A Gemini 335
-	// at several metres is well past 1 cm, so the default is set for that and should be
-	// re-fitted per camera once real clouds are available.
-	float height_tol = 0.10f;
-	float height_tol_per_m = 0.03f;
+	// Fitted to real recorded cloud, not guessed: 300 frames across all five cameras, the 99th
+	// percentile of |z - z_pred| over floor is 0.0075 m at 0.25 m, 0.034 at 1.25 m and
+	// 0.041 at 2.25 m, which a line through 0.02 + 0.01r clears at every range the walk
+	// actually reaches. The earlier 0.10 + 0.03r was 4-14x that, and being generous here
+	// is not the safe direction: the band has to stay UNDER min_obstacle_height or an
+	// obstacle fits inside it and is read as floor. At 0.10 + 0.03r the band passed 0.12 m
+	// at 0.67 m range, and a 5 cm object produced zero lethal cells at any distance.
+	//
+	// It cannot simply be minimised either. Below the sensor's real noise the floor tears
+	// into phantom obstacles, and a tighter band also ends the ground run sooner: mean
+	// profile reach on the far cameras is 2.87 m at 0.10 + 0.03r, 2.48 m here, and 2.29 m
+	// at a flat 0.03. A ramp beyond the reach is a ramp the walk never sees.
+	float height_tol = 0.02f;
+	float height_tol_per_m = 0.01f;
 	// How far BACK IN RANGE the prediction is anchored, in metres. Deliberately a
 	// distance and not a sample count: on a vertical face many samples pile up at one
 	// range, so a count-based window slides up the face and the anchor climbs with it,
@@ -152,6 +160,11 @@ struct GroundColumnsResult
 {
 	// Per-pixel class, row-major, width * height. Same indexing as the input.
 	std::vector<GroundClass> classes;
+	// Which columns seeded from their own view rather than from the reference. Only these
+	// are fit to be published back into a shared reference; a column seeded from the
+	// reference re-publishing its own result would let the estimate drift with nothing
+	// holding it to an actual observation.
+	std::vector<uint8_t> column_native_seed;
 	// Per-column ground profile as (range, z), ascending in range -- the input
 	// analyze_beam() takes. Indexed by image column.
 	std::vector<std::vector<std::pair<float, float>>> column_ground;
@@ -169,9 +182,24 @@ struct GroundColumnsResult
 // Rows are walked from the LAST row towards the first, which for a downward-tilted
 // camera is near-to-far. A camera mounted upside down should hand in its rows already
 // flipped rather than have a flag here decide it.
+// seed_reference, when set, answers "how high is the floor at (x, y)?" and replaces the
+// z = 0 assumption in seeding only. Everything after the seed is unchanged: the walk still
+// follows what this camera can see, and a reference that is wrong costs at most one
+// mis-seeded column rather than a mis-shaped ground.
+using GroundSeedReference = std::function<bool (float, float, float &)>;
+
+// Asked once per column, before the walk begins: what does the floor do along this
+// bearing? Returning a run of (range, z) lets the walk start with a gradient rather than a
+// single point -- see the note in ground_reference.hpp on why the height alone does not
+// help. An empty result leaves the column to seed on its own.
+using GroundProfileReference =
+	std::function<std::vector<std::pair<float, float>> (float, float)>;
+
 inline GroundColumnsResult segment_ground_columns(
 	const std::vector<GroundPoint> &pts, int width, int height,
-	const GroundColumnsConfig &cfg)
+	const GroundColumnsConfig &cfg,
+	const GroundSeedReference &seed_reference = GroundSeedReference(),
+	const GroundProfileReference &profile_reference = GroundProfileReference())
 {
 	GroundColumnsResult out;
 	if (width <= 0 || height <= 0 ||
@@ -180,6 +208,7 @@ inline GroundColumnsResult segment_ground_columns(
 
 	out.classes.assign(pts.size(), GroundClass::INVALID);
 	out.column_ground.assign(static_cast<std::size_t>(width), {});
+	out.column_native_seed.assign(static_cast<std::size_t>(width), 0u);
 
 	const float max_grade_tan = std::tan(cfg.max_grade_deg * 3.14159265f / 180.0f);
 	const float max_predict_tan = std::tan(cfg.max_predict_grade_deg * 3.14159265f / 180.0f);
@@ -192,6 +221,32 @@ inline GroundColumnsResult segment_ground_columns(
 	{
 		run.clear();
 		bool seeded = false;
+		bool native = false;
+
+		// Prime the run from the reference, when one can describe this column's bearing.
+		// The samples are floor the robot has already driven over, so the walk begins with
+		// both a height and the slope between them, and its first real sample is judged
+		// against a prediction that is actually going somewhere.
+		if (profile_reference)
+		{
+			// Bearing from the column's nearest valid sample; every sample in a column
+			// shares it.
+			for (int v = height - 1; v >= 0; --v)
+			{
+				const std::size_t idx = static_cast<std::size_t>(v) * static_cast<std::size_t>(width) +
+										static_cast<std::size_t>(u);
+				if (!pts[idx].valid)
+					continue;
+				const std::vector<std::pair<float, float>> pr =
+					profile_reference(pts[idx].x, pts[idx].y);
+				if (pr.size() >= 2)
+				{
+					run = pr;
+					seeded = true;
+				}
+				break;
+			}
+		}
 		int gap = 0;
 		float last_range = 0.0f;
 
@@ -221,9 +276,13 @@ inline GroundColumnsResult segment_ground_columns(
 				// Seed on the near floor. Anything else near the bottom of the frame is
 				// an obstacle standing on floor we have not established yet, so it is
 				// left unclassified rather than guessed at.
-				if (range <= cfg.seed_max_range && std::fabs(p.z) <= cfg.seed_z_tol)
+				float expect = 0.0f;
+				const bool have_ref =
+					seed_reference && seed_reference(p.x, p.y, expect);
+				if (range <= cfg.seed_max_range && std::fabs(p.z - expect) <= cfg.seed_z_tol)
 				{
 					seeded = true;
+					native = !have_ref;
 					run.emplace_back(range, p.z);
 					out.classes[idx] = GroundClass::GROUND;
 					++out.ground_count;
@@ -258,15 +317,37 @@ inline GroundColumnsResult segment_ground_columns(
 			while (a > 0 && tail.first - run[static_cast<std::size_t>(a)].first < cfg.slope_anchor_span)
 				--a;
 			const std::pair<float, float> &anchor = run[static_cast<std::size_t>(a)];
-			int b = a;
-			while (b > 0 && anchor.first - run[static_cast<std::size_t>(b)].first < cfg.slope_anchor_span)
+			// Slope from the run's most recent span, height from the anchor. The two are
+			// separated because they are answering different questions, and tying them
+			// together breaks one of them.
+			//
+			// The HEIGHT test needs a reference that cannot advance -- a vertical face
+			// piles many samples at a single range, so anything measured "recently" walks
+			// up it. That is what the anchor is for, and it stays.
+			//
+			// The SLOPE has the opposite requirement. Taken back at the anchor, it keeps
+			// describing floor the camera saw BEFORE a ramp began, and the prediction
+			// extrapolates that flat floor while the real surface climbs away from it.
+			// front sees only ~0.5 m of level ground before a ramp at 2 m, which is not
+			// enough to measure any slope at all, so the estimate is noise: measured on a
+			// 10-degree ramp the prediction ran off at -17 degrees and every sample past
+			// 2.2 m fell outside the band. Taking the slope from the run's tail lets it
+			// pick the ramp up as the run advances onto it.
+			//
+			// A face cannot corrupt this, because its samples never join the run -- the
+			// anchored height test rejects them first, and only accepted samples are in
+			// `run`. Measured over ramp, flat floor, a box on the ramp and a head-on wall:
+			// ramp cells wrongly marked 824 -> 8, box on the ramp 24 -> 23 cells, wall
+			// unchanged at 116, flat floor 0 either way.
+			int b = n - 1;
+			while (b > 0 && tail.first - run[static_cast<std::size_t>(b)].first < cfg.slope_anchor_span)
 				--b;
 			const std::pair<float, float> &prev = run[static_cast<std::size_t>(b)];
 			float slope = 0.0f;
 			{
-				const float dr = anchor.first - prev.first;
+				const float dr = tail.first - prev.first;
 				if (dr > 1e-3f)
-					slope = (anchor.second - prev.second) / dr;
+					slope = (tail.second - prev.second) / dr;
 			}
 			slope = std::max(-max_predict_tan, std::min(max_predict_tan, slope));
 
@@ -325,6 +406,7 @@ inline GroundColumnsResult segment_ground_columns(
 
 		if (!seeded)
 			++out.columns_unseeded;
+		out.column_native_seed[static_cast<std::size_t>(u)] = native ? 1u : 0u;
 		out.column_ground[static_cast<std::size_t>(u)] = run;
 		(void)last_range;
 	}

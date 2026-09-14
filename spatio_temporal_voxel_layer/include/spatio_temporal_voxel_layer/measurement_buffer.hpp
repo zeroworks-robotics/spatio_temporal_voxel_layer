@@ -48,6 +48,7 @@
 // measurement structs
 #include "spatio_temporal_voxel_layer/measurement_reading.h"
 #include "spatio_temporal_voxel_layer/ground_columns.hpp"
+#include "spatio_temporal_voxel_layer/ground_reference.hpp"
 // PCL
 #include "pcl/common/transforms.h"
 #include "pcl/filters/voxel_grid.h"
@@ -113,7 +114,9 @@ public:
     const ModelType & model_type,
     const std::string & height_filter_frame,
     const bool & ground_relative_height, const double & ground_max_grade_deg,
-    const double & ground_height_tol,
+    const double & ground_height_tol, const double & ground_height_tol_per_m,
+    const bool & ground_reference_publish, const bool & ground_reference_use,
+    std::shared_ptr<ground_seg::GroundReference> ground_reference,
     rclcpp::Clock::SharedPtr clock,
     rclcpp::Logger logger);
 
@@ -187,6 +190,12 @@ private:
   bool _ground_relative_height;
   double _ground_max_grade_deg;
   double _ground_height_tol;
+  double _ground_height_tol_per_m;
+  // Shared across every buffer in the layer, so a camera that can see flat floor
+  // beneath the robot can seed one that cannot. See ground_reference.hpp.
+  bool _ground_reference_publish;
+  bool _ground_reference_use;
+  std::shared_ptr<ground_seg::GroundReference> _ground_reference;
   rclcpp::Clock::SharedPtr clock_;
   rclcpp::Logger logger_;
 };
