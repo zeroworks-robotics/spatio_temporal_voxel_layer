@@ -28,13 +28,13 @@ def generate_launch_description():
     pkg = get_package_share_directory('spatio_temporal_voxel_layer')
     default_params = os.path.join(pkg, 'config', 'cona_stvl_costmap.yaml')
 
-    params_file = LaunchConfiguration('params_file')
+    params_file = LaunchConfiguration('stvl_params_file')  # see the header note
     autostart = LaunchConfiguration('autostart')
     set_dds = LaunchConfiguration('set_cyclonedds_uri')
 
     return LaunchDescription([
         DeclareLaunchArgument(
-            'params_file', default_value=default_params,
+            'stvl_params_file', default_value=default_params,
             description='Costmap + STVL parameters.'),
         DeclareLaunchArgument(
             'autostart', default_value='true',
