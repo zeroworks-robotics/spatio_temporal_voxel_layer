@@ -79,7 +79,7 @@ costmap:
       # the planner's collision-check parameters keep the true size.
       footprint: "[[0.44, 0.39], [0.44, -0.39], [-0.44, -0.39], [-0.44, 0.39]]"
 
-      plugins: ["stvl_layer"]
+      plugins: ["stvl_layer", "denoise_layer"]
 
       stvl_layer:
         plugin: "spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer"
@@ -433,3 +433,28 @@ costmap:
           decay_acceleration: 0.0    # any non-zero value behaves the same (cubic); trail length is set by voxel_decay
           model_type: 1                 # 3D lidar hourglass frustum
           clear_after_reading: true
+
+      # ---------------- speck filter ----------------
+      # Drops connected groups of lethal cells smaller than minimal_group_size. It runs on
+      # the MASTER grid and must come after stvl_layer in the plugin list, so it sees what
+      # the planner sees rather than one layer's contribution.
+      #
+      # 3, not more. Measured on cona_20260915_150504, all six sources: one- and two-cell
+      # groups go from 83 per frame to 0, and the group count from 106 to 44 -- that count
+      # is what the planner feels, since each group is one more thing to route around. The
+      # 83 cells removed are inside this bench's run-to-run spread, so the total lethal
+      # count does not measurably drop; nothing real is being paid for them.
+      #
+      # 5 would also clear the 3-4 cell groups, and that is where it stops being free:
+      # five cells is about 0.008 m2, roughly a 9 cm square, and a chair leg or a thin
+      # post at range is that small. Not raised without a bag that has one in it.
+      #
+      # This is a shape filter and only a shape filter. The floor that the cameras mark
+      # when the body pitches arrives as one connected sheet of several hundred cells and
+      # is untouched by any threshold that keeps real obstacles -- that is what
+      # ground_seed_gravity_aligned above is for. The two are separate problems.
+      denoise_layer:
+        plugin: "nav2_costmap_2d::DenoiseLayer"
+        enabled: true
+        minimal_group_size: 3
+        group_connectivity_type: 8   # 8 = diagonal neighbours count as connected
