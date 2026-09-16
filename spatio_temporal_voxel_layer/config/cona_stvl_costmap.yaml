@@ -148,7 +148,7 @@ costmap:
         # chassis. The floor the robot drives on is level with gravity; base_link is not,
         # once the body pitches. With this on, pitch drops out of the seed test and the
         # tolerance above only has to cover real sensor noise.
-        ground_seed_gravity_aligned: false
+        ground_seed_gravity_aligned: true
         ground_max_grade_deg:       20.0
         ground_height_tol:          0.02   # fitted to real cloud noise; a budget,
         ground_height_tol_per_m:    0.01   # not a safety margin -- see ground_columns.hpp
