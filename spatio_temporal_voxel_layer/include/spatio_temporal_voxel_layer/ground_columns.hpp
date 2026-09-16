@@ -66,7 +66,22 @@ struct GroundColumnsConfig
 	// supplied, in which case the height that reference gives for the sample's position. Wide enough for the near floor to be found
 	// under sensor noise and a little pitch; tight enough that a box right in front of
 	// the camera cannot become the seed.
+	// Grows with range because the thing it has to tolerate does. A body pitch of theta
+	// puts flat floor at d*sin(theta) in base_link, so the gap between the expected floor
+	// and the real one is proportional to how far out the sample is. A flat tolerance is
+	// therefore too loose near the robot -- where it lets a real low object seed the
+	// column and become its floor -- and too tight further out, where the walk refuses to
+	// start on floor that is merely tilted. Per-metre 0.105 corresponds to 6 degrees.
 	float seed_z_tol = 0.10f;
+	float seed_z_tol_per_m = 0.0f;
+	// Which way is up, in the filter frame. The seed asks "is this sample near the floor
+	// the robot stands on", and the floor is level with GRAVITY, not with the chassis. Left
+	// at (0,0,1) the question is asked along the chassis z instead, and a body pitch of
+	// theta then puts flat floor at d*sin(theta) -- 0.07 m per degree at the 2 m seed range
+	// -- so the walk refuses to seed on floor that is perfectly ordinary and simply not
+	// level relative to a pitched robot. Set from the odom->filter-frame rotation, this
+	// measures the sample against a level plane and the pitch drops out.
+	float up_x = 0.0f, up_y = 0.0f, up_z = 1.0f;
 	// Do not seed beyond this range. The seed is trusted more than later samples, and
 	// that trust is only justified where the geometry says floor is nearly certain.
 	float seed_max_range = 2.0f;
@@ -259,6 +274,12 @@ inline GroundColumnsResult segment_ground_columns(
 				continue;
 
 			const float range = std::sqrt(p.x * p.x + p.y * p.y);
+			// Height along `up` rather than along the frame's own z. Everything the walk
+			// does from here -- seeding, the run it accumulates, the prediction, the grade
+			// and the deviation test -- is in this measure, so a body pitch simply is not
+			// present: a level floor reads flat instead of rising at d*sin(pitch). With the
+			// default up = (0,0,1) pz IS p.z and none of this changes.
+			const float pz = p.x * cfg.up_x + p.y * cfg.up_y + p.z * cfg.up_z;
 			if (range < cfg.min_range || range > cfg.max_range)
 				continue;
 			if (p.z > cfg.max_ground_z)
@@ -279,11 +300,19 @@ inline GroundColumnsResult segment_ground_columns(
 				float expect = 0.0f;
 				const bool have_ref =
 					seed_reference && seed_reference(p.x, p.y, expect);
-				if (range <= cfg.seed_max_range && std::fabs(p.z - expect) <= cfg.seed_z_tol)
+				const float seed_tol = cfg.seed_z_tol + cfg.seed_z_tol_per_m * range;
+				// Both sides measured along `up`, so the comparison is against a level plane
+				// rather than one parallel to the chassis. This matters even when a reference
+				// answers: it reports the floor height as gz minus the frame's own height,
+				// which is already a LEVEL-referenced number, so comparing it against a raw
+				// p.z mixes two different verticals and the difference is d*sin(pitch).
+				// With the default up = (0,0,1) this is p.z - expect, exactly as before.
+				const float dev = pz - expect;
+				if (range <= cfg.seed_max_range && std::fabs(dev) <= seed_tol)
 				{
 					seeded = true;
 					native = !have_ref;
-					run.emplace_back(range, p.z);
+					run.emplace_back(range, pz);
 					out.classes[idx] = GroundClass::GROUND;
 					++out.ground_count;
 					last_range = range;
@@ -361,7 +390,7 @@ inline GroundColumnsResult segment_ground_columns(
 			// A sample well below the predicted floor is a hole. Judged before the grade
 			// test on purpose: the drop into a stairwell is steep, and calling it an
 			// obstacle would put a phantom wall at the top of the stairs.
-			if (p.z < z_pred - cfg.hole_depth)
+			if (pz < z_pred - cfg.hole_depth)
 			{
 				out.classes[idx] = GroundClass::HOLE;
 				++out.hole_count;
@@ -369,7 +398,7 @@ inline GroundColumnsResult segment_ground_columns(
 			}
 
 			// --- the two tests -----------------------------------------------------
-			bool accept = std::fabs(p.z - z_pred) <= tol;
+			bool accept = std::fabs(pz - z_pred) <= tol;
 			if (accept && dr_anchor >= cfg.min_grade_span)
 			{
 				// Grade measured from the anchor, not from the previous sample. Between
@@ -378,7 +407,7 @@ inline GroundColumnsResult segment_ground_columns(
 				// says nothing; over the anchor span it is a real measurement. It is
 				// also what catches a vertical face outright, since the face's whole
 				// height is divided by the span back to the floor below it.
-				const float grade = std::fabs(p.z - anchor.second) / dr_anchor;
+				const float grade = std::fabs(pz - anchor.second) / dr_anchor;
 				accept = grade <= max_grade_tan;
 			}
 
@@ -390,7 +419,7 @@ inline GroundColumnsResult segment_ground_columns(
 
 			if (accept)
 			{
-				run.emplace_back(range, p.z);
+				run.emplace_back(range, pz);
 				out.classes[idx] = GroundClass::GROUND;
 				++out.ground_count;
 				gap = 0;

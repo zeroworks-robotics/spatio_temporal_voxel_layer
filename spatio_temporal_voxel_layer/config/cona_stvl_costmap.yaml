@@ -122,6 +122,36 @@ costmap:
         # the raw topic permanently. 0 disables the fallback and the source simply stays dark.
         topic_fallback_wait:      3.0
         topic_fallback_suffix:    "_deskewed"
+        # ---- ground-relative height -------------------------------------------
+        # One switch for the whole feature. Every source inherits these, so setting this
+        # to false returns each source to the plain min/max_obstacle_height band and the
+        # layer behaves as it did before the feature existed.
+        #
+        # ground_min_obstacle_height is a SEPARATE number from min_obstacle_height on
+        # purpose. With the gate on it is measured from the floor under each point, so
+        # 0.05 is a sensitivity; min_obstacle_height stays 0.12 because with the gate off
+        # it is measured from base_link, where this rig's own floor already reads
+        # 0.05-0.08 m at 2-3 m -- 0.05 there marks the floor rather than obstacles on it.
+        # Measured on cona_20260915_150504: dropping the fixed band to 0.05 multiplies the
+        # voxels below 0.05 m by six, 207 -> 1341 per frame, and the gate takes back only
+        # about a third of that.
+        ground_relative_height:     true
+        ground_min_obstacle_height: 0.05
+        # How far from the expected floor a sample may sit and still seed its column.
+        # A column that never seeds has no floor profile and falls back to the fixed band,
+        # so this decides whether the gate is in play at all. Body pitch puts flat floor at
+        # d*sin(theta) in base_link -- 0.07 m per degree at the 2.0 m seed range -- and this
+        # rig pitches 4-6 deg inside a second while driving.
+        ground_seed_z_tol:          0.10
+        ground_seed_z_tol_per_m:    0.00   # 0.105 per metre would be 6 deg of pitch
+        # Measure the seed's height against a LEVEL plane instead of one parallel to the
+        # chassis. The floor the robot drives on is level with gravity; base_link is not,
+        # once the body pitches. With this on, pitch drops out of the seed test and the
+        # tolerance above only has to cover real sensor noise.
+        ground_seed_gravity_aligned: false
+        ground_max_grade_deg:       20.0
+        ground_height_tol:          0.02   # fitted to real cloud noise; a budget,
+        ground_height_tol_per_m:    0.01   # not a safety margin -- see ground_columns.hpp
         mapping_mode:             false
         map_save_duration:        60.0
 
@@ -140,11 +170,6 @@ costmap:
           # 1.5 m short of a ramp it has no level ground to measure from at all.
           ground_reference_use: true
           # Height measured from the ground under each point, not from base_link.
-          # See ground_columns.hpp; needs the organized cloud these cameras publish.
-          ground_relative_height: true
-          ground_max_grade_deg: 20.0
-          ground_height_tol:       0.02   # fitted to real cloud noise; a budget,
-          ground_height_tol_per_m: 0.01   # not a safety margin -- see the header
           data_type: PointCloud2
           topic: /camera_frontRGBD/depth/points
           marking: true
@@ -156,7 +181,7 @@ costmap:
           # shorter than a kerb was ever marked: a 5 cm object produced zero lethal cells at
           # every range tested, and an 8 cm one likewise. The tolerance band has to stay
           # under this number or an obstacle fits inside it; 0.02 + 0.01r does, out to 3 m.
-          min_obstacle_height: 0.05
+          min_obstacle_height: 0.12
           max_obstacle_height: 1.20    # 1.20 m above the chassis, per height_filter_frame
           height_filter_frame: base_link   # gate height in the robot's frame, not the
                                            # world's, so the band tilts on a ramp
@@ -186,11 +211,6 @@ costmap:
           # 1.5 m short of a ramp it has no level ground to measure from at all.
           ground_reference_use: true
           # Height measured from the ground under each point, not from base_link.
-          # See ground_columns.hpp; needs the organized cloud these cameras publish.
-          ground_relative_height: true
-          ground_max_grade_deg: 20.0
-          ground_height_tol:       0.02   # fitted to real cloud noise; a budget,
-          ground_height_tol_per_m: 0.01   # not a safety margin -- see the header
           data_type: PointCloud2
           topic: /camera_leftRGBD/depth/points
           marking: true
@@ -202,7 +222,7 @@ costmap:
           # shorter than a kerb was ever marked: a 5 cm object produced zero lethal cells at
           # every range tested, and an 8 cm one likewise. The tolerance band has to stay
           # under this number or an obstacle fits inside it; 0.02 + 0.01r does, out to 3 m.
-          min_obstacle_height: 0.05
+          min_obstacle_height: 0.12
           max_obstacle_height: 1.20    # 1.20 m above the chassis, per height_filter_frame
           height_filter_frame: base_link   # gate height in the robot's frame, not the
                                            # world's, so the band tilts on a ramp
@@ -232,11 +252,6 @@ costmap:
           # 1.5 m short of a ramp it has no level ground to measure from at all.
           ground_reference_use: true
           # Height measured from the ground under each point, not from base_link.
-          # See ground_columns.hpp; needs the organized cloud these cameras publish.
-          ground_relative_height: true
-          ground_max_grade_deg: 20.0
-          ground_height_tol:       0.02   # fitted to real cloud noise; a budget,
-          ground_height_tol_per_m: 0.01   # not a safety margin -- see the header
           data_type: PointCloud2
           topic: /camera_rightRGBD/depth/points
           marking: true
@@ -248,7 +263,7 @@ costmap:
           # shorter than a kerb was ever marked: a 5 cm object produced zero lethal cells at
           # every range tested, and an 8 cm one likewise. The tolerance band has to stay
           # under this number or an obstacle fits inside it; 0.02 + 0.01r does, out to 3 m.
-          min_obstacle_height: 0.05
+          min_obstacle_height: 0.12
           max_obstacle_height: 1.20    # 1.20 m above the chassis, per height_filter_frame
           height_filter_frame: base_link   # gate height in the robot's frame, not the
                                            # world's, so the band tilts on a ramp
@@ -278,11 +293,6 @@ costmap:
           # 1.5 m short of a ramp it has no level ground to measure from at all.
           ground_reference_use: true
           # Height measured from the ground under each point, not from base_link.
-          # See ground_columns.hpp; needs the organized cloud these cameras publish.
-          ground_relative_height: true
-          ground_max_grade_deg: 20.0
-          ground_height_tol:       0.02   # fitted to real cloud noise; a budget,
-          ground_height_tol_per_m: 0.01   # not a safety margin -- see the header
           data_type: PointCloud2
           topic: /camera_rearRGBD/depth/points
           marking: true
@@ -294,7 +304,7 @@ costmap:
           # shorter than a kerb was ever marked: a 5 cm object produced zero lethal cells at
           # every range tested, and an 8 cm one likewise. The tolerance band has to stay
           # under this number or an obstacle fits inside it; 0.02 + 0.01r does, out to 3 m.
-          min_obstacle_height: 0.05
+          min_obstacle_height: 0.12
           max_obstacle_height: 1.20    # 1.20 m above the chassis, per height_filter_frame
           height_filter_frame: base_link   # gate height in the robot's frame, not the
                                            # world's, so the band tilts on a ramp
@@ -324,18 +334,13 @@ costmap:
           # still ahead. See ground_reference.hpp.
           ground_reference_publish: true
           # Height measured from the ground under each point, not from base_link.
-          # See ground_columns.hpp; needs the organized cloud these cameras publish.
-          ground_relative_height: true
-          ground_max_grade_deg: 20.0
-          ground_height_tol:       0.02   # fitted to real cloud noise; a budget,
-          ground_height_tol_per_m: 0.01   # not a safety margin -- see the header
           data_type: PointCloud2
           topic: /camera_fdownRGBD/depth/points
           marking: true
           clearing: false
           obstacle_range: 2.5
           # 0.05 -- see the note on front_mark.
-          min_obstacle_height: 0.05
+          min_obstacle_height: 0.12
           max_obstacle_height: 1.20    # 1.20 m above the chassis, per height_filter_frame
           height_filter_frame: base_link   # gate height in the robot's frame, not the
                                            # world's, so the band tilts on a ramp
@@ -360,6 +365,13 @@ costmap:
 
         # ---------------- 3D spinning LiDAR ----------------
         lidar_mark:
+          # Opted out of the layer-wide ground gate. The cloud is organized (96 x 900), so
+          # the gate would happily run on it, but a column of a 360-degree spinning scan is
+          # a vertical slice through one azimuth, not a section along the floor the way a
+          # tilted camera's column is. The walk's whole premise -- consecutive pixels are
+          # consecutive samples along the ground -- does not hold, and this has never been
+          # measured on lidar.
+          ground_relative_height: false
           data_type: PointCloud2
           # De-skewed, not raw. The lidar sweeps 360 deg in 100 ms and the driver stamps the
           # cloud with its FIRST point, so a single transform places everything captured later

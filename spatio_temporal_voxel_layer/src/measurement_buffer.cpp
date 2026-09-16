@@ -67,7 +67,10 @@ MeasurementBuffer::MeasurementBuffer(
   const int & voxel_min_points, const bool & enabled,
   const bool & clear_buffer_after_reading, const ModelType & model_type,
   const std::string & height_filter_frame,
-  const bool & ground_relative_height, const double & ground_max_grade_deg,
+  const bool & ground_relative_height, const double & ground_min_obstacle_height,
+  const double & ground_seed_z_tol, const double & ground_seed_z_tol_per_m,
+  const bool & ground_seed_gravity_aligned,
+  const double & ground_max_grade_deg,
   const double & ground_height_tol, const double & ground_height_tol_per_m,
   const bool & ground_reference_publish, const bool & ground_reference_use,
   std::shared_ptr<ground_seg::GroundReference> ground_reference,
@@ -88,6 +91,10 @@ MeasurementBuffer::MeasurementBuffer(
   _enabled(enabled), _model_type(model_type),
   _height_filter_frame(height_filter_frame),
   _ground_relative_height(ground_relative_height),
+  _ground_min_obstacle_height(ground_min_obstacle_height),
+  _ground_seed_z_tol(ground_seed_z_tol),
+  _ground_seed_z_tol_per_m(ground_seed_z_tol_per_m),
+  _ground_seed_gravity_aligned(ground_seed_gravity_aligned),
   _ground_max_grade_deg(ground_max_grade_deg),
   _ground_height_tol(ground_height_tol),
   _ground_height_tol_per_m(ground_height_tol_per_m),
@@ -138,6 +145,8 @@ bool MeasurementBuffer::FilterGroundRelative(point_cloud_ptr & cld) const
   cfg.height_tol_per_m = static_cast<float>(_ground_height_tol_per_m);
   // The band this layer is configured with is what the walk should consider "not floor",
   // so the two stay in step instead of being tuned against each other.
+  cfg.seed_z_tol = static_cast<float>(_ground_seed_z_tol);
+  cfg.seed_z_tol_per_m = static_cast<float>(_ground_seed_z_tol_per_m);
   cfg.max_ground_z = static_cast<float>(_max_obstacle_height);
 
   // Seeding may consult what the other cameras have seen. Only the seed uses it; the walk
@@ -149,7 +158,9 @@ bool MeasurementBuffer::FilterGroundRelative(point_cloud_ptr & cld) const
   const double now = clock_->now().seconds();
   geometry_msgs::msg::TransformStamped f2g;
   bool have_f2g = false;
-  if ((_ground_reference_use || _ground_reference_publish) && _ground_reference) {
+  if (_ground_seed_gravity_aligned ||
+    ((_ground_reference_use || _ground_reference_publish) && _ground_reference))
+  {
     try {
       f2g = _buffer.lookupTransform(
         _global_frame, _height_filter_frame, tf2_ros::fromMsg(cld->header.stamp));
@@ -178,6 +189,16 @@ bool MeasurementBuffer::FilterGroundRelative(point_cloud_ptr & cld) const
         return true;
       };
   
+  }
+
+  if (_ground_seed_gravity_aligned && have_f2g) {
+    // Gravity, expressed in the filter frame: the third ROW of the filter->global
+    // rotation, which is the global frame's z axis seen from here. The global frame is
+    // gravity-aligned, so this is the direction a level floor is perpendicular to.
+    const auto & q = f2g.transform.rotation;
+    cfg.up_x = static_cast<float>(2.0 * (q.x * q.z - q.y * q.w));
+    cfg.up_y = static_cast<float>(2.0 * (q.y * q.z + q.x * q.w));
+    cfg.up_z = static_cast<float>(1.0 - 2.0 * (q.x * q.x + q.y * q.y));
   }
 
   const ground_seg::GroundColumnsResult seg =
@@ -245,8 +266,15 @@ bool MeasurementBuffer::FilterGroundRelative(point_cloud_ptr & cld) const
       const float range = std::sqrt((*jx) * (*jx) + (*jy) * (*jy));
       base = NearestGroundZ(seg.column_ground[u], range);
     }
-    const float h = *jz - base;
-    if (h < _min_obstacle_height || h > _max_obstacle_height) {
+    // Against the GATE's own band, not the fixed one. The fixed band is what this source
+    // falls back to when the gate is off, and it is set for a floor at height_filter_frame's
+    // origin; reusing it here would tie the two together and make the switch below change
+    // more than it says.
+    // Same measure the walk used, so `base` and the point are the same kind of height.
+    // Mixing them would put the pitch back in exactly where it was taken out.
+    const float h =
+      (*jx) * cfg.up_x + (*jy) * cfg.up_y + (*jz) * cfg.up_z - base;
+    if (h < _ground_min_obstacle_height || h > _max_obstacle_height) {
       continue;
     }
     keep.push_back(*jx);

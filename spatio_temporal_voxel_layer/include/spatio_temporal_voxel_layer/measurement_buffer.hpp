@@ -113,7 +113,10 @@ public:
     const bool & clear_buffer_after_reading,
     const ModelType & model_type,
     const std::string & height_filter_frame,
-    const bool & ground_relative_height, const double & ground_max_grade_deg,
+    const bool & ground_relative_height, const double & ground_min_obstacle_height,
+    const double & ground_seed_z_tol, const double & ground_seed_z_tol_per_m,
+    const bool & ground_seed_gravity_aligned,
+    const double & ground_max_grade_deg,
     const double & ground_height_tol, const double & ground_height_tol_per_m,
     const bool & ground_reference_publish, const bool & ground_reference_use,
     std::shared_ptr<ground_seg::GroundReference> ground_reference,
@@ -188,6 +191,19 @@ private:
   // ground_columns.hpp; requires an ORGANIZED cloud and falls back to the fixed band
   // with a warning when it does not get one.
   bool _ground_relative_height;
+  // The band the gate applies, measured from the ground under each point rather than from
+  // height_filter_frame's origin. Separate from _min_obstacle_height because the two mean
+  // different things: 0.05 above the local floor is a sensitivity, 0.05 above base_link is
+  // most of this rig's floor. Keeping one number for both would make turning the gate off
+  // silently change what the other number means.
+  double _ground_min_obstacle_height;
+  // How far from the expected floor a sample may sit and still seed its column. The walk
+  // cannot start without a seed, and a column that never seeds falls back to the fixed
+  // band -- so this is the parameter that decides whether the gate is in play at all when
+  // the floor is not where the robot expects it.
+  double _ground_seed_z_tol;
+  double _ground_seed_z_tol_per_m;
+  bool _ground_seed_gravity_aligned;
   double _ground_max_grade_deg;
   double _ground_height_tol;
   double _ground_height_tol_per_m;
