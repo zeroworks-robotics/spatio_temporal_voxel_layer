@@ -52,18 +52,17 @@ costmap:
 
       rolling_window: true
       # 18 m. The 14 above rested on the planner window being robot-CENTRED, and it is
-      # not. planner_yn.cpp:856,859 build a 500x500 px window at m2pixel 50 (0.02 m/px,
-      # so 10 x 10 m) with robot_on_grid = (250, 350) -- not (250, 250). Reading that
-      # through the CoNA pixel convention (row = gcy - k*x_rel, x_rel forward) the window
-      # reaches 7.00 m ahead, 2.98 m behind and 5.00 m to each side: it looks forward.
+      # not. The planner resamples this costmap into a 500x500 px window at 0.02 m/px
+      # (so 10 x 10 m), and the robot does NOT sit at its centre: the window reaches
+      # 7.00 m ahead, 2.98 m behind and 5.00 m to each side. It looks forward.
       #
       # So the corner farthest from the robot is the front one, sqrt(7.0^2 + 5.0^2) =
       # 8.60 m, and the window rotates with the heading, so an axis-aligned costmap has
       # to carry half-extent 8.60 m -- 17.2 m square -- to cover it at every heading.
       # At 14 (half-extent 7.0) the front corners leave the costmap by up to 1.60 m near
-      # 45-degree headings, and getLocalCostmap's warpAffine fills what it cannot read
-      # with BORDER_CONSTANT 125, unobserved (cona_bridge.cpp:229). That is the hole seen
-      # in the local planner image on the gochuck bags. 18 covers 8.60 with 0.40 to spare.
+      # 45-degree headings, and the resampling fills what it cannot read with a constant
+      # "unobserved" value. That is the hole seen in the local planner image on the
+      # reference recordings. 18 covers 8.60 with 0.40 to spare.
       #
       # The cost is cells, not voxels: obstacle_range bounds the voxel count and is
       # unchanged, while worldToMap stops rejecting the ones that were being computed and
@@ -77,10 +76,10 @@ costmap:
       # larger per side. Clearing tests cell CENTRES, and the voxel containing the
       # body surface centres at ~0.415 m -- outside a 0.40 polygon, so the body
       # edge survived in 194/194 frames until this margin was added. Clearing only:
-      # CoNA 0_General keeps the true size for collision checking.
+      # the planner's collision-check parameters keep the true size.
       footprint: "[[0.44, 0.39], [0.44, -0.39], [-0.44, -0.39], [-0.44, 0.39]]"
 
-      plugins: ["stvl_layer"]
+      plugins: ["stvl_layer", "denoise_layer"]
 
       stvl_layer:
         plugin: "spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer"
@@ -123,6 +122,36 @@ costmap:
         # the raw topic permanently. 0 disables the fallback and the source simply stays dark.
         topic_fallback_wait:      3.0
         topic_fallback_suffix:    "_deskewed"
+        # ---- ground-relative height -------------------------------------------
+        # One switch for the whole feature. Every source inherits these, so setting this
+        # to false returns each source to the plain min/max_obstacle_height band and the
+        # layer behaves as it did before the feature existed.
+        #
+        # ground_min_obstacle_height is a SEPARATE number from min_obstacle_height on
+        # purpose. With the gate on it is measured from the floor under each point, so
+        # 0.05 is a sensitivity; min_obstacle_height stays 0.12 because with the gate off
+        # it is measured from base_link, where this rig's own floor already reads
+        # 0.05-0.08 m at 2-3 m -- 0.05 there marks the floor rather than obstacles on it.
+        # Measured on cona_20260915_150504: dropping the fixed band to 0.05 multiplies the
+        # voxels below 0.05 m by six, 207 -> 1341 per frame, and the gate takes back only
+        # about a third of that.
+        ground_relative_height:     true
+        ground_min_obstacle_height: 0.05
+        # How far from the expected floor a sample may sit and still seed its column.
+        # A column that never seeds has no floor profile and falls back to the fixed band,
+        # so this decides whether the gate is in play at all. Body pitch puts flat floor at
+        # d*sin(theta) in base_link -- 0.07 m per degree at the 2.0 m seed range -- and this
+        # rig pitches 4-6 deg inside a second while driving.
+        ground_seed_z_tol:          0.10
+        ground_seed_z_tol_per_m:    0.00   # 0.105 per metre would be 6 deg of pitch
+        # Measure the seed's height against a LEVEL plane instead of one parallel to the
+        # chassis. The floor the robot drives on is level with gravity; base_link is not,
+        # once the body pitches. With this on, pitch drops out of the seed test and the
+        # tolerance above only has to cover real sensor noise.
+        ground_seed_gravity_aligned: true
+        ground_max_grade_deg:       20.0
+        ground_height_tol:          0.02   # fitted to real cloud noise; a budget,
+        ground_height_tol_per_m:    0.01   # not a safety margin -- see ground_columns.hpp
         mapping_mode:             false
         map_save_duration:        60.0
 
@@ -136,11 +165,22 @@ costmap:
 
         # ---------------- front RGBD (level, +x) ----------------
         front_mark:
+          # Seeds from the grid when its own near field is already on a slope. front is
+          # the case this exists for: its nearest visible floor is 1.52 m out, so standing
+          # 1.5 m short of a ramp it has no level ground to measure from at all.
+          ground_reference_use: true
+          # Height measured from the ground under each point, not from base_link.
           data_type: PointCloud2
           topic: /camera_frontRGBD/depth/points
           marking: true
           clearing: false
           obstacle_range: 3.0
+          # 0.05, not 0.12. Measured against the ground beneath the point rather than the
+          # chassis, so this is now a real object height rather than a guard against the
+          # floor -- and the floor is already excluded by the gate above. At 0.12 nothing
+          # shorter than a kerb was ever marked: a 5 cm object produced zero lethal cells at
+          # every range tested, and an 8 cm one likewise. The tolerance band has to stay
+          # under this number or an obstacle fits inside it; 0.02 + 0.01r does, out to 3 m.
           min_obstacle_height: 0.12
           max_obstacle_height: 1.20    # 1.20 m above the chassis, per height_filter_frame
           height_filter_frame: base_link   # gate height in the robot's frame, not the
@@ -166,11 +206,22 @@ costmap:
 
         # ---------------- left RGBD (20 deg down, +72 deg yaw) ----------------
         left_mark:
+          # Seeds from the grid when its own near field is already on a slope. front is
+          # the case this exists for: its nearest visible floor is 1.52 m out, so standing
+          # 1.5 m short of a ramp it has no level ground to measure from at all.
+          ground_reference_use: true
+          # Height measured from the ground under each point, not from base_link.
           data_type: PointCloud2
           topic: /camera_leftRGBD/depth/points
           marking: true
           clearing: false
           obstacle_range: 3.0
+          # 0.05, not 0.12. Measured against the ground beneath the point rather than the
+          # chassis, so this is now a real object height rather than a guard against the
+          # floor -- and the floor is already excluded by the gate above. At 0.12 nothing
+          # shorter than a kerb was ever marked: a 5 cm object produced zero lethal cells at
+          # every range tested, and an 8 cm one likewise. The tolerance band has to stay
+          # under this number or an obstacle fits inside it; 0.02 + 0.01r does, out to 3 m.
           min_obstacle_height: 0.12
           max_obstacle_height: 1.20    # 1.20 m above the chassis, per height_filter_frame
           height_filter_frame: base_link   # gate height in the robot's frame, not the
@@ -196,11 +247,22 @@ costmap:
 
         # ---------------- right RGBD (20 deg down, -72 deg yaw) ----------------
         right_mark:
+          # Seeds from the grid when its own near field is already on a slope. front is
+          # the case this exists for: its nearest visible floor is 1.52 m out, so standing
+          # 1.5 m short of a ramp it has no level ground to measure from at all.
+          ground_reference_use: true
+          # Height measured from the ground under each point, not from base_link.
           data_type: PointCloud2
           topic: /camera_rightRGBD/depth/points
           marking: true
           clearing: false
           obstacle_range: 3.0
+          # 0.05, not 0.12. Measured against the ground beneath the point rather than the
+          # chassis, so this is now a real object height rather than a guard against the
+          # floor -- and the floor is already excluded by the gate above. At 0.12 nothing
+          # shorter than a kerb was ever marked: a 5 cm object produced zero lethal cells at
+          # every range tested, and an 8 cm one likewise. The tolerance band has to stay
+          # under this number or an obstacle fits inside it; 0.02 + 0.01r does, out to 3 m.
           min_obstacle_height: 0.12
           max_obstacle_height: 1.20    # 1.20 m above the chassis, per height_filter_frame
           height_filter_frame: base_link   # gate height in the robot's frame, not the
@@ -226,11 +288,22 @@ costmap:
 
         # ---------------- back RGBD (55 deg down, 180 deg yaw) ----------------
         back_mark:
+          # Seeds from the grid when its own near field is already on a slope. front is
+          # the case this exists for: its nearest visible floor is 1.52 m out, so standing
+          # 1.5 m short of a ramp it has no level ground to measure from at all.
+          ground_reference_use: true
+          # Height measured from the ground under each point, not from base_link.
           data_type: PointCloud2
           topic: /camera_rearRGBD/depth/points
           marking: true
           clearing: false
           obstacle_range: 3.0
+          # 0.05, not 0.12. Measured against the ground beneath the point rather than the
+          # chassis, so this is now a real object height rather than a guard against the
+          # floor -- and the floor is already excluded by the gate above. At 0.12 nothing
+          # shorter than a kerb was ever marked: a 5 cm object produced zero lethal cells at
+          # every range tested, and an 8 cm one likewise. The tolerance band has to stay
+          # under this number or an obstacle fits inside it; 0.02 + 0.01r does, out to 3 m.
           min_obstacle_height: 0.12
           max_obstacle_height: 1.20    # 1.20 m above the chassis, per height_filter_frame
           height_filter_frame: base_link   # gate height in the robot's frame, not the
@@ -256,11 +329,17 @@ costmap:
 
         # ---------------- front-down RGBD (55 deg down) ----------------
         fdown_mark:
+          # Publishes into the shared elevation grid: it looks steeply down and sees floor
+          # from 0.34 m, directly beneath the robot, which stays level while a ramp is
+          # still ahead. See ground_reference.hpp.
+          ground_reference_publish: true
+          # Height measured from the ground under each point, not from base_link.
           data_type: PointCloud2
           topic: /camera_fdownRGBD/depth/points
           marking: true
           clearing: false
           obstacle_range: 2.5
+          # 0.05 -- see the note on front_mark.
           min_obstacle_height: 0.12
           max_obstacle_height: 1.20    # 1.20 m above the chassis, per height_filter_frame
           height_filter_frame: base_link   # gate height in the robot's frame, not the
@@ -284,19 +363,26 @@ costmap:
           model_type: 0
           clear_after_reading: true
 
-        # ---------------- RoboSense Airy 3D LiDAR ----------------
+        # ---------------- 3D spinning LiDAR ----------------
         lidar_mark:
+          # Opted out of the layer-wide ground gate. The cloud is organized (96 x 900), so
+          # the gate would happily run on it, but a column of a 360-degree spinning scan is
+          # a vertical slice through one azimuth, not a section along the floor the way a
+          # tilted camera's column is. The walk's whole premise -- consecutive pixels are
+          # consecutive samples along the ground -- does not hold, and this has never been
+          # measured on lidar.
+          ground_relative_height: false
           data_type: PointCloud2
-          # De-skewed, not raw. The RSAIRY sweeps 360 deg in 100 ms and the driver stamps the
-          # cloud with its FIRST point (rslidar_sdk config.yaml: ts_first_point: true), so a
-          # single transform places everything captured later in the sweep as if the robot had
-          # not moved. Measured: at 2 rad/s a wall 5 m out is displaced up to 1 m, and rotation
-          # costs 10.4% of the cells the chassis could stand in. Feeding the relay's output
-          # recovers 37% of that, and 103% together with an odom-anchored grid.
+          # De-skewed, not raw. The lidar sweeps 360 deg in 100 ms and the driver stamps the
+          # cloud with its FIRST point, so a single transform places everything captured later
+          # in the sweep as if the robot had not moved. Measured: at 2 rad/s a wall 5 m out is
+          # displaced up to 1 m, and rotation costs 10.4% of the cells the chassis could stand
+          # in. Feeding the de-skew relay's output recovers 37% of that, and 103% together with
+          # an odom-anchored grid.
           #
-          # rslidar_sdk/rslidar_deskew_node produces this; it comes up with the lidar
-          # (AIRY_DESKEW=0 turns it off). If nothing publishes it, the layer falls back to
-          # /rslidar_points after stvl_layer.topic_fallback_wait and says so at WARN.
+          # A de-skew relay node produces this topic; it comes up with the lidar. If nothing
+          # publishes it, the layer falls back to the raw topic after
+          # stvl_layer.topic_fallback_wait and says so at WARN.
           topic: /rslidar_points_deskewed
           marking: true
           clearing: false
@@ -309,8 +395,8 @@ costmap:
           obstacle_range: 14.0
           min_obstacle_height: 0.08
           # 1.50, while the five cameras are still at 1.20. Deliberate for now, but the
-          # bands should agree: CoNA puts the chassis at 1.3 m, so 1.20 stops below the
-          # robot's own roofline and something at 1.25 m is seen by the lidar alone.
+          # bands should agree: the chassis reaches 1.3 m, so 1.20 stops below the robot's
+          # own roofline and something at 1.25 m is seen by the lidar alone.
           max_obstacle_height: 1.50    # 1.50 m above the chassis, per height_filter_frame
           height_filter_frame: base_link   # gate height in the robot's frame, not the
                                            # world's, so the band tilts on a ramp
@@ -321,7 +407,7 @@ costmap:
           # 1, not the 2 the cameras use. 2 was set in 88bd7a2 when this file had only
           # five cameras ranged at 3.0/2.5 m and mark_threshold was 3; the lidar block
           # arrived later and inherited the number without anyone measuring it against
-          # lidar density. Measured on one RSAIRY scan (84713 points, 4 cm voxels), the
+          # lidar density. Measured on one lidar scan (84713 points, 4 cm voxels), the
           # share of voxels holding 2+ returns is 81.0% at 0-2 m, 18.9% at 4-6 m, 1.4%
           # at 6-8 m and 0.0% beyond 8 m -- so 2 was silently capping the lidar at about
           # 6 m no matter what obstacle_range said. Single strays are still filtered,
@@ -336,7 +422,7 @@ costmap:
           topic: /rslidar_points_deskewed
           marking: false
           clearing: true
-          min_z: 0.2                    # RSAIRY min_distance
+          min_z: 0.2                    # the lidar's own min_distance
           # Inert while decay_acceleration is 0.0: a voxel inside the frustum gets
           # base_duration_to_decay - 0, which is what one outside gets anyway, so the
           # far plane changes nothing. Kept at the deployed value; it only starts to
@@ -347,3 +433,28 @@ costmap:
           decay_acceleration: 0.0    # any non-zero value behaves the same (cubic); trail length is set by voxel_decay
           model_type: 1                 # 3D lidar hourglass frustum
           clear_after_reading: true
+
+      # ---------------- speck filter ----------------
+      # Drops connected groups of lethal cells smaller than minimal_group_size. It runs on
+      # the MASTER grid and must come after stvl_layer in the plugin list, so it sees what
+      # the planner sees rather than one layer's contribution.
+      #
+      # 3, not more. Measured on cona_20260915_150504, all six sources: one- and two-cell
+      # groups go from 83 per frame to 0, and the group count from 106 to 44 -- that count
+      # is what the planner feels, since each group is one more thing to route around. The
+      # 83 cells removed are inside this bench's run-to-run spread, so the total lethal
+      # count does not measurably drop; nothing real is being paid for them.
+      #
+      # 5 would also clear the 3-4 cell groups, and that is where it stops being free:
+      # five cells is about 0.008 m2, roughly a 9 cm square, and a chair leg or a thin
+      # post at range is that small. Not raised without a bag that has one in it.
+      #
+      # This is a shape filter and only a shape filter. The floor that the cameras mark
+      # when the body pitches arrives as one connected sheet of several hundred cells and
+      # is untouched by any threshold that keeps real obstacles -- that is what
+      # ground_seed_gravity_aligned above is for. The two are separate problems.
+      denoise_layer:
+        plugin: "nav2_costmap_2d::DenoiseLayer"
+        enabled: true
+        minimal_group_size: 3
+        group_connectivity_type: 8   # 8 = diagonal neighbours count as connected

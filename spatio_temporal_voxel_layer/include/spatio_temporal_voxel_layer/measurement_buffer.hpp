@@ -47,6 +47,8 @@
 #include <memory>
 // measurement structs
 #include "spatio_temporal_voxel_layer/measurement_reading.h"
+#include "spatio_temporal_voxel_layer/ground_columns.hpp"
+#include "spatio_temporal_voxel_layer/ground_reference.hpp"
 // PCL
 #include "pcl/common/transforms.h"
 #include "pcl/filters/voxel_grid.h"
@@ -111,6 +113,13 @@ public:
     const bool & clear_buffer_after_reading,
     const ModelType & model_type,
     const std::string & height_filter_frame,
+    const bool & ground_relative_height, const double & ground_min_obstacle_height,
+    const double & ground_seed_z_tol, const double & ground_seed_z_tol_per_m,
+    const bool & ground_seed_gravity_aligned,
+    const double & ground_max_grade_deg,
+    const double & ground_height_tol, const double & ground_height_tol_per_m,
+    const bool & ground_reference_publish, const bool & ground_reference_use,
+    std::shared_ptr<ground_seg::GroundReference> ground_reference,
     rclcpp::Clock::SharedPtr clock,
     rclcpp::Logger logger);
 
@@ -169,7 +178,40 @@ private:
   // Frame the min/max_obstacle_height band is measured in. Empty means the global frame,
   // which is the upstream behaviour; naming base_link ties the band to the chassis so it
   // tilts with the robot on a ramp instead of staying level with the world.
+  // Drop ground and hole points and gate the rest on height above the ground beneath
+  // them. Returns false if it could not run, leaving `cld` untouched.
+  bool FilterGroundRelative(point_cloud_ptr & cld) const;
+  // Ground height at `range` from an ascending (range, z) profile.
+  static float NearestGroundZ(
+    const std::vector<std::pair<float, float>> & profile, const float & range);
+
   std::string _height_filter_frame;
+  // When true, min/max_obstacle_height are measured from the ground found beneath each
+  // point rather than from _height_filter_frame's origin. See the ramp note in
+  // ground_columns.hpp; requires an ORGANIZED cloud and falls back to the fixed band
+  // with a warning when it does not get one.
+  bool _ground_relative_height;
+  // The band the gate applies, measured from the ground under each point rather than from
+  // height_filter_frame's origin. Separate from _min_obstacle_height because the two mean
+  // different things: 0.05 above the local floor is a sensitivity, 0.05 above base_link is
+  // most of this rig's floor. Keeping one number for both would make turning the gate off
+  // silently change what the other number means.
+  double _ground_min_obstacle_height;
+  // How far from the expected floor a sample may sit and still seed its column. The walk
+  // cannot start without a seed, and a column that never seeds falls back to the fixed
+  // band -- so this is the parameter that decides whether the gate is in play at all when
+  // the floor is not where the robot expects it.
+  double _ground_seed_z_tol;
+  double _ground_seed_z_tol_per_m;
+  bool _ground_seed_gravity_aligned;
+  double _ground_max_grade_deg;
+  double _ground_height_tol;
+  double _ground_height_tol_per_m;
+  // Shared across every buffer in the layer, so a camera that can see flat floor
+  // beneath the robot can seed one that cannot. See ground_reference.hpp.
+  bool _ground_reference_publish;
+  bool _ground_reference_use;
+  std::shared_ptr<ground_seg::GroundReference> _ground_reference;
   rclcpp::Clock::SharedPtr clock_;
   rclcpp::Logger logger_;
 };

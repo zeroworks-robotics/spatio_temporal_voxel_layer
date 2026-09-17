@@ -164,6 +164,49 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
   node->get_parameter(name_ + ".topic_fallback_wait", _topic_fallback_wait);
   declareParameter("topic_fallback_suffix", rclcpp::ParameterValue(std::string("_deskewed")));
   node->get_parameter(name_ + ".topic_fallback_suffix", _topic_fallback_suffix);
+  // ---- ground-relative height, layer-wide -----------------------------------------
+  // One switch for the whole feature. Every source inherits these unless it sets its own,
+  // so turning the gate off is a single line and returns each source to the fixed
+  // min/max_obstacle_height band it would have used upstream.
+  //
+  // ground_min_obstacle_height is deliberately NOT min_obstacle_height. With the gate on
+  // the band is measured from the floor under each point, so 0.05 is a sensitivity; with
+  // it off the same number would be measured from height_filter_frame's origin, where this
+  // rig's own floor already reaches 0.05-0.08 m at range. One number for both would make
+  // the switch quietly change the meaning of the other.
+  bool ground_relative_height_default;
+  double ground_min_obstacle_height_default, ground_max_grade_deg_default;
+  double ground_seed_z_tol_default, ground_seed_z_tol_per_m_default;
+  bool ground_seed_gravity_aligned_default;
+  double ground_height_tol_default, ground_height_tol_per_m_default;
+  declareParameter("ground_relative_height", rclcpp::ParameterValue(false));
+  node->get_parameter(name_ + ".ground_relative_height", ground_relative_height_default);
+  declareParameter("ground_min_obstacle_height", rclcpp::ParameterValue(0.05));
+  node->get_parameter(
+    name_ + ".ground_min_obstacle_height", ground_min_obstacle_height_default);
+  // Seeding tolerance. The default 0.10 is what the walk shipped with; it is a separate
+  // knob from height_tol because it guards a different assumption -- not "how noisy is the
+  // floor" but "how far from flat-and-level may the floor be before the walk refuses to
+  // start". A body pitch of theta puts flat floor at d*sin(theta) in base_link, which at
+  // the 2.0 m seed range is 0.07 m per degree of pitch.
+  declareParameter("ground_seed_z_tol", rclcpp::ParameterValue(0.10));
+  node->get_parameter(name_ + ".ground_seed_z_tol", ground_seed_z_tol_default);
+  declareParameter("ground_seed_z_tol_per_m", rclcpp::ParameterValue(0.0));
+  node->get_parameter(
+    name_ + ".ground_seed_z_tol_per_m", ground_seed_z_tol_per_m_default);
+  // Ask the seed's question about a LEVEL floor rather than one parallel to the chassis.
+  // Off by default: it changes what seeds, and it needs the global frame to be
+  // gravity-aligned, which odom is and an arbitrary height_filter_frame need not be.
+  declareParameter("ground_seed_gravity_aligned", rclcpp::ParameterValue(false));
+  node->get_parameter(
+    name_ + ".ground_seed_gravity_aligned", ground_seed_gravity_aligned_default);
+  declareParameter("ground_max_grade_deg", rclcpp::ParameterValue(20.0));
+  node->get_parameter(name_ + ".ground_max_grade_deg", ground_max_grade_deg_default);
+  declareParameter("ground_height_tol", rclcpp::ParameterValue(0.02));
+  node->get_parameter(name_ + ".ground_height_tol", ground_height_tol_default);
+  declareParameter("ground_height_tol_per_m", rclcpp::ParameterValue(0.01));
+  node->get_parameter(name_ + ".ground_height_tol_per_m", ground_height_tol_per_m_default);
+
   // whether to default on
   declareParameter("enabled", rclcpp::ParameterValue(true));
   node->get_parameter(name_ + ".enabled", _enabled);
@@ -238,6 +281,9 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
 
   matchSize();
 
+  // One reference for the whole layer, so the buffers created below share it.
+  _ground_reference = std::make_shared<ground_seg::GroundReference>();
+
   RCLCPP_INFO(logger_, "%s created underlying voxel grid.", getName().c_str());
 
   std::stringstream ss(_topics_string);
@@ -248,6 +294,11 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
     double min_z, max_z, vFOV, vFOVPadding;
     double hFOV, decay_acceleration, obstacle_range;
     std::string topic, sensor_frame, data_type, filter_str, height_filter_frame;
+    bool ground_relative_height;
+    double ground_min_obstacle_height, ground_seed_z_tol, ground_seed_z_tol_per_m;
+    bool ground_seed_gravity_aligned;
+    double ground_max_grade_deg, ground_height_tol, ground_height_tol_per_m;
+    bool ground_reference_publish, ground_reference_use;
     bool inf_is_valid = false, clearing, marking;
     bool clear_after_reading, enabled;
     int voxel_min_points;
@@ -273,6 +324,39 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
     declareParameter(source + "." + "vertical_fov_padding", rclcpp::ParameterValue(0.0));
     declareParameter(source + "." + "horizontal_fov_angle", rclcpp::ParameterValue(1.04));
     declareParameter(source + "." + "decay_acceleration", rclcpp::ParameterValue(0.0));
+    // Measure min/max_obstacle_height from the ground under each point instead of from
+    // height_filter_frame's origin, so a ramp's surface is not read as a 0.5 m obstacle.
+    // Off by default: it changes what this source marks, and it needs an organized
+    // cloud (the five depth cameras give one; a LaserScan source never will).
+    declareParameter(
+      source + "." + "ground_relative_height",
+      rclcpp::ParameterValue(ground_relative_height_default));
+    declareParameter(
+      source + "." + "ground_min_obstacle_height",
+      rclcpp::ParameterValue(ground_min_obstacle_height_default));
+    declareParameter(
+      source + "." + "ground_seed_z_tol",
+      rclcpp::ParameterValue(ground_seed_z_tol_default));
+    declareParameter(
+      source + "." + "ground_seed_z_tol_per_m",
+      rclcpp::ParameterValue(ground_seed_z_tol_per_m_default));
+    declareParameter(
+      source + "." + "ground_seed_gravity_aligned",
+      rclcpp::ParameterValue(ground_seed_gravity_aligned_default));
+    declareParameter(
+      source + "." + "ground_max_grade_deg",
+      rclcpp::ParameterValue(ground_max_grade_deg_default));
+    declareParameter(
+      source + "." + "ground_height_tol",
+      rclcpp::ParameterValue(ground_height_tol_default));
+    declareParameter(
+      source + "." + "ground_height_tol_per_m",
+      rclcpp::ParameterValue(ground_height_tol_per_m_default));
+    // Share a floor height between cameras. A camera that sees flat ground beneath the
+    // robot publishes; one whose near field is already sloped -- front, whose nearest
+    // floor is 1.52 m out -- uses it to seed. See ground_reference.hpp.
+    declareParameter(source + "." + "ground_reference_publish", rclcpp::ParameterValue(false));
+    declareParameter(source + "." + "ground_reference_use", rclcpp::ParameterValue(false));
     declareParameter(source + "." + "filter", rclcpp::ParameterValue(std::string("passthrough")));
     declareParameter(source + "." + "voxel_min_points", rclcpp::ParameterValue(0));
     declareParameter(source + "." + "clear_after_reading", rclcpp::ParameterValue(false));
@@ -291,6 +375,27 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
     node->get_parameter(
       name_ + "." + source + "." + "height_filter_frame", height_filter_frame);
     node->get_parameter(
+      name_ + "." + source + "." + "ground_relative_height", ground_relative_height);
+    node->get_parameter(
+      name_ + "." + source + "." + "ground_min_obstacle_height", ground_min_obstacle_height);
+    node->get_parameter(
+      name_ + "." + source + "." + "ground_seed_z_tol", ground_seed_z_tol);
+    node->get_parameter(
+      name_ + "." + source + "." + "ground_seed_z_tol_per_m", ground_seed_z_tol_per_m);
+    node->get_parameter(
+      name_ + "." + source + "." + "ground_seed_gravity_aligned",
+      ground_seed_gravity_aligned);
+    node->get_parameter(
+      name_ + "." + source + "." + "ground_max_grade_deg", ground_max_grade_deg);
+    node->get_parameter(
+      name_ + "." + source + "." + "ground_height_tol", ground_height_tol);
+    node->get_parameter(
+      name_ + "." + source + "." + "ground_height_tol_per_m", ground_height_tol_per_m);
+    node->get_parameter(
+      name_ + "." + source + "." + "ground_reference_publish", ground_reference_publish);
+    node->get_parameter(
+      name_ + "." + source + "." + "ground_reference_use", ground_reference_use);
+    node->get_parameter(
       name_ + "." + source + "." + "observation_persistence",
       observation_keep_time);
     node->get_parameter(
@@ -303,6 +408,14 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
     node->get_parameter(name_ + "." + source + "." + "marking", marking);
     node->get_parameter(name_ + "." + source + "." + "clearing", clearing);
     node->get_parameter(name_ + "." + source + "." + "obstacle_range", obstacle_range);
+
+    // The gate only changes what a source MARKS: clearing is decided by the frustum, not
+    // by the surviving points, so a clearing source inheriting the layer-wide switch would
+    // pay for the column walk on every cloud and change nothing. Scope the inheritance to
+    // marking sources rather than making every clearing block opt out by hand.
+    if (!marking) {
+      ground_relative_height = false;
+    }
 
     // minimum distance from camera it can see
     node->get_parameter(name_ + "." + source + "." + "min_z", min_z);
@@ -356,6 +469,11 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
           decay_acceleration, marking, clearing, _voxel_size,
           filter, voxel_min_points, enabled, clear_after_reading, model_type,
           height_filter_frame,
+          ground_relative_height, ground_min_obstacle_height,
+          ground_seed_z_tol, ground_seed_z_tol_per_m, ground_seed_gravity_aligned,
+          ground_max_grade_deg, ground_height_tol,
+          ground_height_tol_per_m,
+          ground_reference_publish, ground_reference_use, _ground_reference,
           node->get_clock(), node->get_logger())));
 
     // Add buffer to marking observation buffers
