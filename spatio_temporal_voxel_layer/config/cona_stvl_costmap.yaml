@@ -72,12 +72,12 @@ costmap:
       height: 18
       resolution: 0.04
 
-      # Chassis is 0.80 x 0.70 (half 0.40 x 0.35); this polygon is one voxel (0.04)
+      # Chassis is 0.82 x 0.60 (half 0.40 x 0.35); this polygon is one voxel (0.04)
       # larger per side. Clearing tests cell CENTRES, and the voxel containing the
       # body surface centres at ~0.415 m -- outside a 0.40 polygon, so the body
       # edge survived in 194/194 frames until this margin was added. Clearing only:
       # the planner's collision-check parameters keep the true size.
-      footprint: "[[0.44, 0.39], [0.44, -0.39], [-0.44, -0.39], [-0.44, 0.39]]"
+      footprint: "[[0.41, 0.30], [0.41, -0.30], [-0.41, -0.30], [-0.41, 0.30]]"
 
       plugins: ["stvl_layer", "denoise_layer"]
 
