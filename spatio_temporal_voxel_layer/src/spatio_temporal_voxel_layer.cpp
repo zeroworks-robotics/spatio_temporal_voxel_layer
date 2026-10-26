@@ -37,6 +37,7 @@
  *                         stevenmacenski@gmail.com
  *********************************************************************/
 
+#include <chrono>
 #include <string>
 #include <unordered_map>
 #include <memory>
@@ -964,6 +965,7 @@ void SpatioTemporalVoxelLayer::updateBounds(
   // Required because UpdateROSCostmap will also lock if AFTER we lock here voxel_grid_lock,
   // and if clearArea is called in between, we will have a deadlock
   boost::unique_lock<mutex_t> cm_lock(*getMutex());
+  const auto cycle_start = std::chrono::steady_clock::now();
 
   boost::recursive_mutex::scoped_lock lock(_voxel_grid_lock);
 
@@ -999,7 +1001,9 @@ void SpatioTemporalVoxelLayer::updateBounds(
     should_save = node->now() - _last_map_save_time > *_map_save_duration;
   }
   if (!_mapping_mode) {
+    const auto tc0 = std::chrono::steady_clock::now();
     _voxel_grid->ClearFrustums(clearing_observations);
+    _phase_ms[0] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tc0).count();
   } else if (should_save) {
     _last_map_save_time = node->now();
     time_t rawtime;
@@ -1018,10 +1022,37 @@ void SpatioTemporalVoxelLayer::updateBounds(
   }
 
   // mark observations
+  const auto tm0 = std::chrono::steady_clock::now();
   _voxel_grid->Mark(marking_observations);
+  _phase_ms[1] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tm0).count();
 
   // update the ROS Layered Costmap
+  const auto tu0 = std::chrono::steady_clock::now();
   UpdateROSCostmap(min_x, min_y, max_x, max_y);
+  _phase_ms[2] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tu0).count();
+
+  {
+    // Cycle cost, logged every 10 s: mean and worst over the period, and where the mean went.
+    // The budget at update_frequency f is 1000/f ms, shared with the rest of the costmap update.
+    const double ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - cycle_start).count();
+    _cycle_ms_sum += ms;
+    _cycle_ms_max = std::max(_cycle_ms_max, ms);
+    ++_cycle_count;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - _cycle_log_time > std::chrono::seconds(10)) {
+      const double nc = static_cast<double>(std::max<size_t>(_cycle_count, 1));
+      RCLCPP_INFO(
+        logger_, "stvl cycle: mean %.2f ms, max %.2f ms over %zu cycles "
+        "(mean: clear+count %.2f, mark %.2f, costmap %.2f)",
+        _cycle_ms_sum / nc, _cycle_ms_max, _cycle_count,
+        _phase_ms[0] / nc, _phase_ms[1] / nc, _phase_ms[2] / nc);
+      _cycle_ms_sum = _cycle_ms_max = 0.0;
+      _phase_ms[0] = _phase_ms[1] = _phase_ms[2] = 0.0;
+      _cycle_count = 0;
+      _cycle_log_time = now;
+    }
+  }
 
   // publish point cloud in navigation mode
   if (_publish_voxels && !_mapping_mode) {

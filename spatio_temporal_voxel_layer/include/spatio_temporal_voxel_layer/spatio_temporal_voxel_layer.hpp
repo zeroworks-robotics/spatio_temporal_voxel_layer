@@ -46,6 +46,7 @@
 // STL
 #include <time.h>
 #include <vector>
+#include <chrono>
 #include <string>
 #include <iostream>
 #include <memory>
@@ -192,6 +193,11 @@ private:
   std::string _topic_fallback_suffix{"_deskewed"};
   std::unordered_map<std::string, std::string> _resolved_topics;
   double _voxel_size, _voxel_decay;
+  // cycle cost log (updateBounds)
+  double _cycle_ms_sum{0.0}, _cycle_ms_max{0.0};
+  double _phase_ms[3]{};
+  size_t _cycle_count{0};
+  std::chrono::steady_clock::time_point _cycle_log_time{};
   int _combination_method, _mark_threshold;
   volume_grid::GlobalDecayModel _decay_model;
   bool _update_footprint_enabled, _enabled;
