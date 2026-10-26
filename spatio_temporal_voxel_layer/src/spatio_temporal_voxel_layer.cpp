@@ -441,6 +441,18 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
     // model type - default depth camera frustum model
     int model_type_int = 0;
     node->get_parameter(name_ + "." + source + "." + "model_type", model_type_int);
+    // organized marking cloud: drop points with fewer same-range neighbours than this
+    int support_min = -1;
+    double support_tol = 0.03, support_tol_per_m = 0.02;
+    bool support_wrap_rows = false;
+    declareParameter(source + "." + "support_filter_min", rclcpp::ParameterValue(-1));
+    declareParameter(source + "." + "support_filter_tol", rclcpp::ParameterValue(0.03));
+    declareParameter(source + "." + "support_filter_tol_per_m", rclcpp::ParameterValue(0.02));
+    declareParameter(source + "." + "support_filter_wrap_rows", rclcpp::ParameterValue(false));
+    node->get_parameter(name_ + "." + source + "." + "support_filter_min", support_min);
+    node->get_parameter(name_ + "." + source + "." + "support_filter_tol", support_tol);
+    node->get_parameter(name_ + "." + source + "." + "support_filter_tol_per_m", support_tol_per_m);
+    node->get_parameter(name_ + "." + source + "." + "support_filter_wrap_rows", support_wrap_rows);
     ModelType model_type = static_cast<ModelType>(model_type_int);
 
     if (filter_str == "passthrough") {
@@ -479,6 +491,16 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
 
     // Add buffer to marking observation buffers
     if (marking) {
+      if (support_min > 0 && filter == buffer::Filters::NONE) {
+        RCLCPP_WARN(logger_, "%s: support_filter_min needs a filter, ignored", source.c_str());
+      } else if (support_min > 0) {
+        _observation_buffers.back()->SetSupportFilter(
+          support_min, support_tol, support_tol_per_m, support_wrap_rows);
+        RCLCPP_INFO(
+          logger_, "%s: support filter, at least %d of 8 neighbours within %.3f + %.3f/m%s",
+          source.c_str(), std::min(support_min, 7), support_tol, support_tol_per_m,
+          support_wrap_rows ? ", rows wrap" : "");
+      }
       _marking_buffers.push_back(_observation_buffers.back());
     }
 

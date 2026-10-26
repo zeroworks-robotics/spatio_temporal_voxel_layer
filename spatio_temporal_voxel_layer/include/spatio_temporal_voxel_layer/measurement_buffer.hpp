@@ -146,6 +146,10 @@ public:
   void SetVerticalFovPadding(const double & vertical_fov_padding);
   void SetHorizontalFovAngle(const double & horizontal_fov_angle);
   void SetVerticalFovAngle(const double & vertical_fov_angle);
+  // Drop marking points with fewer than min_support of their 8 neighbours in the organized
+  // cloud at about the same range (tol + tol_per_m * range); -1 = off. See SupportFilter.
+  void SetSupportFilter(
+    const int & min_support, const double & tol, const double & tol_per_m, const bool & wrap_rows);
 
   // State knoweldge if sensors are operating as expected
   bool UpdatedAtExpectedRate(void) const;
@@ -181,6 +185,14 @@ private:
   // Drop ground and hole points and gate the rest on height above the ground beneath
   // them. Returns false if it could not run, leaving `cld` untouched.
   bool FilterGroundRelative(point_cloud_ptr & cld) const;
+  size_t SupportFilter(
+    const sensor_msgs::msg::PointCloud2 & raw, sensor_msgs::msg::PointCloud2 & out);
+  int _support_min{-1};
+  double _support_tol{0.03}, _support_tol_per_m{0.02};
+  bool _support_wrap_rows{false};
+  // points seen / dropped by the support filter since the last report
+  size_t _support_seen{0}, _support_dropped{0};
+  rclcpp::Time _support_report_time{0, 0, RCL_ROS_TIME};
   // Ground height at `range` from an ascending (range, z) profile.
   static float NearestGroundZ(
     const std::vector<std::pair<float, float>> & profile, const float & range);

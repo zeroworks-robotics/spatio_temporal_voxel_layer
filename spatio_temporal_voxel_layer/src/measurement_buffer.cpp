@@ -403,6 +403,19 @@ void MeasurementBuffer::BufferROSCloud(
       tf2_ros::fromMsg(cloud.header.stamp));
     tf2::doTransform(cloud, *cld_global, tf_stamped);
 
+    if (_support_min > 0 && _filter != Filters::NONE) {
+      if (cloud.height <= 1) {
+        RCLCPP_WARN_ONCE(
+          logger_, "%s: support_filter_min needs an organized cloud; %s is %ux%u. Filter off.",
+          _source_name.c_str(), _topic_name.c_str(), cloud.width, cloud.height);
+      } else {
+        // NaN must be dropped by a filter stage before the grid; the voxel and passthrough
+        // filters do, so the support filter needs one of them
+        SupportFilter(cloud, *cld_global);
+        cld_global->is_dense = false;
+      }
+    }
+
     // Ground-relative height gating. Replaces the fixed band below with the same band
     // measured from the ground found under each point, so a ramp's own surface is
     // ground rather than a 0.5 m obstacle. Runs here because this is the last point at
@@ -590,6 +603,100 @@ void MeasurementBuffer::SetMaxObstacleHeight(const double & max_obstacle_height)
 /*****************************************************************************/
 {
   _max_obstacle_height = max_obstacle_height;
+}
+
+/*****************************************************************************/
+void MeasurementBuffer::SetSupportFilter(
+  const int & min_support, const double & tol, const double & tol_per_m, const bool & wrap_rows)
+/*****************************************************************************/
+{
+  // 8 or more would drop every point and blind the sensor; a negative tolerance likewise
+  _support_min = std::min(min_support, 7);
+  _support_tol = std::max(tol, 0.0);
+  _support_tol_per_m = std::max(tol_per_m, 0.0);
+  _support_wrap_rows = wrap_rows;
+}
+
+/*****************************************************************************/
+size_t MeasurementBuffer::SupportFilter(
+  const sensor_msgs::msg::PointCloud2 & raw, sensor_msgs::msg::PointCloud2 & out)
+/*****************************************************************************/
+{
+  // A real surface returns more than one sample: its neighbours in the organized cloud (the
+  // next pixel, the next ring or firing) land at about the same range. A raindrop, a speck
+  // of dust or a stray return stands alone in front of the background. Ranges are measured
+  // from the sensor in the raw cloud; a dropped point becomes NaN in out (same layout).
+  // A thin pole keeps its neighbours along its length, so it survives a small min_support.
+  const int W = static_cast<int>(raw.width), H = static_cast<int>(raw.height);
+  // the pixel <-> (row, column) mapping below assumes rows without padding
+  if (raw.row_step != raw.width * raw.point_step || out.row_step != out.width * out.point_step ||
+    out.width != raw.width || out.height != raw.height)
+  {
+    RCLCPP_WARN_ONCE(logger_, "%s: support filter skipped, padded or mismatched rows", _source_name.c_str());
+    return 0;
+  }
+  std::vector<float> rng(static_cast<size_t>(W) * H, std::numeric_limits<float>::quiet_NaN());
+  sensor_msgs::PointCloud2ConstIterator<float> rx(raw, "x"), ry(raw, "y"), rz(raw, "z");
+  for (size_t i = 0; i < rng.size(); ++i, ++rx, ++ry, ++rz) {
+    if (std::isfinite(*rx) && std::isfinite(*ry) && std::isfinite(*rz) &&
+      !(*rx == 0.0f && *ry == 0.0f && *rz == 0.0f))
+    {
+      rng[i] = std::sqrt(*rx * *rx + *ry * *ry + *rz * *rz);
+    }
+  }
+  sensor_msgs::PointCloud2Iterator<float> ox(out, "x"), oy(out, "y"), oz(out, "z");
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  size_t dropped = 0;
+  for (int r = 0; r < H; ++r) {
+    for (int c = 0; c < W; ++c, ++ox, ++oy, ++oz) {
+      const float d = rng[static_cast<size_t>(r) * W + c];
+      if (!std::isfinite(d)) {
+        continue;
+      }
+      const float tol = static_cast<float>(_support_tol + _support_tol_per_m * d);
+      int support = 0;
+      for (int dr = -1; dr <= 1 && support < _support_min; ++dr) {
+        for (int dc = -1; dc <= 1; ++dc) {
+          int rr = r + dr;
+          const int cc = c + dc;
+          if (_support_wrap_rows) {
+            // a spinning lidar's rows are azimuth steps: the last row neighbours the first
+            rr = (rr + H) % H;
+          }
+          if ((dr == 0 && dc == 0) || rr < 0 || rr >= H || cc < 0 || cc >= W) {
+            continue;
+          }
+          const float dn = rng[static_cast<size_t>(rr) * W + cc];
+          if (std::isfinite(dn) && std::fabs(dn - d) <= tol) {
+            ++support;
+          }
+        }
+      }
+      if (support < _support_min) {
+        *ox = nan;
+        *oy = nan;
+        *oz = nan;
+        ++dropped;
+      }
+    }
+  }
+  // report the drop ratio every 30 s, so a field run shows what the filter costs per sensor
+  _support_seen += rng.size() - static_cast<size_t>(std::count_if(
+      rng.begin(), rng.end(), [](float v) {return !std::isfinite(v);}));
+  _support_dropped += dropped;
+  const rclcpp::Time now = clock_->now();
+  if (_support_report_time.nanoseconds() == 0 ||
+    _support_report_time.get_clock_type() != now.get_clock_type())
+  {
+    _support_report_time = now;
+  } else if ((now - _support_report_time).seconds() > 30.0) {
+    RCLCPP_INFO(
+      logger_, "%s: support filter dropped %.2f%% of %zu returns in the last 30 s", _source_name.c_str(),
+      100.0 * _support_dropped / std::max<size_t>(_support_seen, 1), _support_seen);
+    _support_seen = _support_dropped = 0;
+    _support_report_time = now;
+  }
+  return dropped;
 }
 
 /*****************************************************************************/
