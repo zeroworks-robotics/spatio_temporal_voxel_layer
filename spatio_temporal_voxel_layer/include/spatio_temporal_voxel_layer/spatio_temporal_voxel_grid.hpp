@@ -216,6 +216,7 @@ protected:
   double _costmap_origin_x, _costmap_origin_y, _costmap_resolution;
   unsigned int _costmap_size_x, _costmap_size_y;
   boost::mutex _grid_lock;
+  int _prune_counter{0};
 };
 
 }  // namespace volume_grid

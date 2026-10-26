@@ -265,8 +265,12 @@ void SpatioTemporalVoxelGrid::TemporalClearAndGenerateCostmap(
     }
   }
 
-  // free memory taken by expired voxels
-  _grid->pruneGrid();
+  // Free memory taken by expired voxels. Pruning only drops empty branches, it changes no
+  // value, so it need not run every cycle; on the Orin it was a fixed slice of each one.
+  if (++_prune_counter >= 10) {
+    _prune_counter = 0;
+    _grid->pruneGrid();
+  }
 }
 
 /*****************************************************************************/
@@ -517,16 +521,14 @@ openvdb::Vec3d SpatioTemporalVoxelGrid::IndexToWorld(
   const openvdb::Coord & coord) const
 /*****************************************************************************/
 {
-  // Applies tranform stored in getTransform.
-  openvdb::Vec3d pose_world =  _grid->indexToWorld(coord);
-
-  // Using the center for world coordinate
-  const double & center_offset = _voxel_size / 2.0;
-  pose_world[0] += center_offset;
-  pose_world[1] += center_offset;
-  pose_world[2] += center_offset;
-
-  return pose_world;
+  // The grid's transform is a pure scale by _voxel_size (InitializeGrid), so this is the
+  // same arithmetic _grid->indexToWorld does, without the virtual map call that cost a
+  // noticeable share of every traversal on the Orin. Plus half a voxel: the centre.
+  const double center_offset = _voxel_size / 2.0;
+  return openvdb::Vec3d(
+    coord.x() * _voxel_size + center_offset,
+    coord.y() * _voxel_size + center_offset,
+    coord.z() * _voxel_size + center_offset);
 }
 
 /*****************************************************************************/
