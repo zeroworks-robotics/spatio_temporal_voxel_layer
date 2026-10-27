@@ -46,6 +46,7 @@ find_package(builtin_interfaces REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(openvdb_vendor REQUIRED)
+find_package(nlohmann_json REQUIRED)
 
 remove_definitions(-DDISABLE_LIBUSB-1.0)
 find_package(Eigen3 REQUIRED)
@@ -110,12 +111,13 @@ add_library(${library_name} SHARED
             src/spatio_temporal_voxel_layer.cpp
             src/spatio_temporal_voxel_grid.cpp
             src/measurement_buffer.cpp
+            src/door_trim_layer.cpp
             src/frustum_models/depth_camera_frustum.cpp
             src/frustum_models/three_dimensional_lidar_frustum.cpp
             src/vdb2pc.cpp
 )
 
-target_link_libraries(${library_name} "${cpp_typesupport_target}")
+target_link_libraries(${library_name} "${cpp_typesupport_target}" nlohmann_json::nlohmann_json)
 target_compile_definitions(${library_name} PUBLIC "PLUGINLIB__DISABLE_BOOST_FUNCTIONS")
 
 target_link_libraries(${library_name}
