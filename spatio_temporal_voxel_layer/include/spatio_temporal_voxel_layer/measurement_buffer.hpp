@@ -150,6 +150,8 @@ public:
   // cloud at about the same range (tol + tol_per_m * range); -1 = off. See SupportFilter.
   void SetSupportFilter(
     const int & min_support, const double & tol, const double & tol_per_m, const bool & wrap_rows);
+  // Lifetime of this source's marks, s, shorter than the layer's voxel_decay; negative = layer's.
+  void SetVoxelDecay(const double & voxel_decay);
 
   // State knoweldge if sensors are operating as expected
   bool UpdatedAtExpectedRate(void) const;
@@ -187,6 +189,8 @@ private:
   bool FilterGroundRelative(point_cloud_ptr & cld) const;
   size_t SupportFilter(
     const sensor_msgs::msg::PointCloud2 & raw, sensor_msgs::msg::PointCloud2 & out);
+  // Lifetime of this source's marks, s; negative = the layer's voxel_decay. See SetVoxelDecay.
+  double _source_voxel_decay{-1.0};
   int _support_min{-1};
   double _support_tol{0.03}, _support_tol_per_m{0.02};
   bool _support_wrap_rows{false};

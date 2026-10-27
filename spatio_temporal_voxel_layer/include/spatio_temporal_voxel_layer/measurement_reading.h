@@ -111,7 +111,8 @@ struct MeasurementReading
     _marking(obs._marking),
     _clearing(obs._clearing),
     _decay_acceleration(obs._decay_acceleration),
-    _model_type(obs._model_type)
+    _model_type(obs._model_type),
+    _voxel_decay(obs._voxel_decay)
   {
   }
 
@@ -122,6 +123,8 @@ struct MeasurementReading
   double _vertical_fov_in_rad, _vertical_fov_padding_in_m, _horizontal_fov_in_rad;
   double _marking, _clearing, _decay_acceleration;
   ModelType _model_type;
+  // How long this reading's marks live, s; negative = the layer's voxel_decay.
+  double _voxel_decay{-1.0};
 };
 
 }  // namespace observation

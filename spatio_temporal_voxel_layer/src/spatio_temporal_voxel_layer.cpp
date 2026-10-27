@@ -49,6 +49,10 @@
 namespace spatio_temporal_voxel_layer
 {
 
+// Shortest per-source mark life: two 10 Hz lidar scans plus a costmap cycle, so one dropped scan
+// does not make an obstacle only that source sees blink out of the costmap.
+constexpr double kMinSourceDecay = 0.25;
+
 using std::placeholders::_1;
 using std::placeholders::_2;
 using std::placeholders::_3;
@@ -289,6 +293,10 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
 
   std::stringstream ss(_topics_string);
   std::string source;
+  // A short-lived source's marks are written back-dated, and frustum acceleration grows with a
+  // mark's age, so a clearing frustum would remove them almost at once. Checked after the loop.
+  std::vector<std::shared_ptr<buffer::MeasurementBuffer>> short_life_buffers;
+  bool clearing_accelerates = false;
   while (ss >> source) {
     // get the parameters for the specific topic
     double observation_keep_time, expected_update_rate, min_obstacle_height, max_obstacle_height;
@@ -445,6 +453,12 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
     int support_min = -1;
     double support_tol = 0.03, support_tol_per_m = 0.02;
     bool support_wrap_rows = false;
+    // Lifetime of this source's marks, shorter than the layer's voxel_decay (s); negative = the
+    // layer's. A lidar spreads its returns off a door frame by a few cm on every scan, and a second
+    // of scans stacked in the grid marks the whole spread; a short life keeps only the last scans.
+    double source_decay = -1.0;
+    declareParameter(source + "." + "voxel_decay", rclcpp::ParameterValue(-1.0));
+    node->get_parameter(name_ + "." + source + "." + "voxel_decay", source_decay);
     declareParameter(source + "." + "support_filter_min", rclcpp::ParameterValue(-1));
     declareParameter(source + "." + "support_filter_tol", rclcpp::ParameterValue(0.03));
     declareParameter(source + "." + "support_filter_tol_per_m", rclcpp::ParameterValue(0.02));
@@ -491,6 +505,27 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
 
     // Add buffer to marking observation buffers
     if (marking) {
+      if (source_decay >= 0.0 &&
+        (_decay_model != volume_grid::LINEAR || source_decay >= _voxel_decay))
+      {
+        RCLCPP_WARN(
+          logger_, "%s: voxel_decay %.2f s needs the linear decay model and less than the layer's "
+          "%.2f s, ignored", source.c_str(), source_decay, _voxel_decay);
+      } else if (source_decay >= 0.0) {
+        // The costmap is filled while clearing, before this cycle's marks go in, so a mark first
+        // shows one cycle late; a life near a scan period would hide the source or make it blink.
+        if (source_decay < kMinSourceDecay) {
+          RCLCPP_WARN(
+            logger_, "%s: voxel_decay %.2f s raised to %.2f s, the shortest life that survives a "
+            "dropped scan", source.c_str(), source_decay, kMinSourceDecay);
+          source_decay = kMinSourceDecay;
+        }
+        _observation_buffers.back()->SetVoxelDecay(source_decay);
+        short_life_buffers.push_back(_observation_buffers.back());
+        RCLCPP_INFO(
+          logger_, "%s: marks live %.2f s (layer %.2f s)", source.c_str(), source_decay,
+          _voxel_decay);
+      }
       if (support_min > 0 && filter == buffer::Filters::NONE) {
         RCLCPP_WARN(logger_, "%s: support_filter_min needs a filter, ignored", source.c_str());
       } else if (support_min > 0) {
@@ -507,6 +542,7 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
     // Add buffer to clearing observation buffers
     if (clearing) {
       _clearing_buffers.push_back(_observation_buffers.back());
+      clearing_accelerates = clearing_accelerates || decay_acceleration != 0.0;
     }
 
     rmw_qos_profile_t custom_qos_profile = rmw_qos_profile_sensor_data;
@@ -581,6 +617,15 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
       target_frames.push_back(_global_frame);
       target_frames.push_back(sensor_frame);
       _observation_notifiers.back()->setTargetFrames(target_frames);
+    }
+  }
+
+  if (clearing_accelerates && !short_life_buffers.empty()) {
+    RCLCPP_WARN(
+      logger_, "per-source voxel_decay is off: a clearing source has a non-zero "
+      "decay_acceleration, which would clear the back-dated marks early");
+    for (auto & buffer : short_life_buffers) {
+      buffer->SetVoxelDecay(-1.0);
     }
   }
 
@@ -1125,6 +1170,12 @@ SpatioTemporalVoxelLayer::dynamicParametersCallback(std::vector<rclcpp::Paramete
     std::stringstream ss(_topics_string);
     std::string source;
     while (ss >> source) {
+      if (name == name_ + "." + source + "." + "voxel_decay") {
+        // Marks already in the grid carry the old life in their values; set it at configure time.
+        result.successful = false;
+        result.reason = name + " can only be set at configure time";
+        return result;
+      }
       if (type == ParameterType::PARAMETER_DOUBLE) {
         if (name == name_ + "." + source + "." + "min_obstacle_height") {
           for (auto & buffer : _observation_buffers) {

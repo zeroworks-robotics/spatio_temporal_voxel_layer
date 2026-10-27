@@ -371,6 +371,7 @@ void MeasurementBuffer::BufferROSCloud(
       _vertical_fov_padding;
     _observation_list.front()._horizontal_fov_in_rad = _horizontal_fov;
     _observation_list.front()._decay_acceleration = _decay_acceleration;
+    _observation_list.front()._voxel_decay = _source_voxel_decay;
     _observation_list.front()._clearing = _clearing;
     _observation_list.front()._marking = _marking;
     _observation_list.front()._model_type = _model_type;
@@ -603,6 +604,13 @@ void MeasurementBuffer::SetMaxObstacleHeight(const double & max_obstacle_height)
 /*****************************************************************************/
 {
   _max_obstacle_height = max_obstacle_height;
+}
+
+/*****************************************************************************/
+void MeasurementBuffer::SetVoxelDecay(const double & voxel_decay)
+/*****************************************************************************/
+{
+  _source_voxel_decay = voxel_decay;
 }
 
 /*****************************************************************************/

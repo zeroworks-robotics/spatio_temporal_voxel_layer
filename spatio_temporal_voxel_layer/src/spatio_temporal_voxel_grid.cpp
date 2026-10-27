@@ -331,6 +331,12 @@ void SpatioTemporalVoxelGrid::operator()(
   if (obs._marking) {
     float mark_range_2 = obs._obstacle_range_in_m * obs._obstacle_range_in_m;
     const double cur_time = _clock->now().seconds();
+    // A source with a shorter life writes its mark as if made earlier, so the layer's linear decay
+    // expires it after that life; a mark that would live longer is never overwritten by it.
+    const bool short_life = _decay_model == LINEAR && obs._voxel_decay >= 0.0 &&
+      obs._voxel_decay < _voxel_decay;
+    const double mark_time =
+      short_life ? cur_time - (_voxel_decay - obs._voxel_decay) : cur_time;
 
     // One accessor for the whole cloud. See MarkGridPoint.
     openvdb::DoubleGrid::Accessor accessor = _grid->getAccessor();
@@ -357,13 +363,13 @@ void SpatioTemporalVoxelGrid::operator()(
 
       openvdb::Vec3d mark_grid(this->WorldToIndex(
           openvdb::Vec3d(x, y, z)));
+      const openvdb::Coord mark_coord(mark_grid[0], mark_grid[1], mark_grid[2]);
+      double held = 0.0;
+      if (short_life && accessor.probeValue(mark_coord, held) && held >= mark_time) {
+        continue;
+      }
 
-      if (!this->MarkGridPoint(
-          accessor,
-          openvdb::Coord(
-            mark_grid[0], mark_grid[1],
-            mark_grid[2]), cur_time))
-      {
+      if (!this->MarkGridPoint(accessor, mark_coord, mark_time)) {
         std::cout << "Failed to mark point." << std::endl;
       }
     }
