@@ -459,6 +459,10 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
     double source_decay = -1.0;
     declareParameter(source + "." + "voxel_decay", rclcpp::ParameterValue(-1.0));
     node->get_parameter(name_ + "." + source + "." + "voxel_decay", source_decay);
+    // only points within this range of the sensor get that short life (m); -1 = all points
+    double source_decay_range = -1.0;
+    declareParameter(source + "." + "voxel_decay_range", rclcpp::ParameterValue(-1.0));
+    node->get_parameter(name_ + "." + source + "." + "voxel_decay_range", source_decay_range);
     // near-range bias: returns pushed out along the beam by min(k / range, max) (m), cloud in sensor frame
     double range_bias_k = 0.0, range_bias_max = 0.05;
     declareParameter(source + "." + "range_bias_k", rclcpp::ParameterValue(0.0));
@@ -533,10 +537,12 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
           source_decay = kMinSourceDecay;
         }
         _observation_buffers.back()->SetVoxelDecay(source_decay);
+        _observation_buffers.back()->SetVoxelDecayRange(source_decay_range);
         short_life_buffers.push_back(_observation_buffers.back());
         RCLCPP_INFO(
-          logger_, "%s: marks live %.2f s (layer %.2f s)", source.c_str(), source_decay,
-          _voxel_decay);
+          logger_, "%s: marks live %.2f s (layer %.2f s)%s", source.c_str(), source_decay,
+          _voxel_decay, source_decay_range >= 0.0 ?
+          (" within " + std::to_string(source_decay_range).substr(0, 4) + " m").c_str() : "");
       }
       if (support_min > 0 && filter == buffer::Filters::NONE) {
         RCLCPP_WARN(logger_, "%s: support_filter_min needs a filter, ignored", source.c_str());
@@ -1200,7 +1206,8 @@ SpatioTemporalVoxelLayer::dynamicParametersCallback(std::vector<rclcpp::Paramete
     while (ss >> source) {
       // Marks already in the grid carry the old life in their values, and the filters are set
       // on the buffers at configure time only; refuse rather than accept and ignore.
-      static const std::vector<std::string> configure_only{"voxel_decay", "range_bias_k", "range_bias_max", "edge_filter_px", "edge_filter_min_run"};
+      static const std::vector<std::string> configure_only{"voxel_decay", "voxel_decay_range", "range_bias_k",
+        "range_bias_max", "edge_filter_px", "edge_filter_min_run"};
       if (std::any_of(configure_only.begin(), configure_only.end(),
         [&](const std::string & key) {return name == name_ + "." + source + "." + key;}))
       {

@@ -372,6 +372,7 @@ void MeasurementBuffer::BufferROSCloud(
     _observation_list.front()._horizontal_fov_in_rad = _horizontal_fov;
     _observation_list.front()._decay_acceleration = _decay_acceleration;
     _observation_list.front()._voxel_decay = _source_voxel_decay;
+    _observation_list.front()._voxel_decay_range = _source_voxel_decay_range;
     _observation_list.front()._clearing = _clearing;
     _observation_list.front()._marking = _marking;
     _observation_list.front()._model_type = _model_type;
@@ -738,6 +739,13 @@ size_t MeasurementBuffer::EdgeFilter(
     _edge_report_time = now;
   }
   return dropped;
+}
+
+/*****************************************************************************/
+void MeasurementBuffer::SetVoxelDecayRange(const double & range)
+/*****************************************************************************/
+{
+  _source_voxel_decay_range = range;
 }
 
 /*****************************************************************************/

@@ -43,6 +43,8 @@
 
 #include "spatio_temporal_voxel_layer/spatio_temporal_voxel_grid.hpp"
 
+#include <limits>
+
 namespace volume_grid
 {
 
@@ -335,8 +337,12 @@ void SpatioTemporalVoxelGrid::operator()(
     // expires it after that life; a mark that would live longer is never overwritten by it.
     const bool short_life = _decay_model == LINEAR && obs._voxel_decay >= 0.0 &&
       obs._voxel_decay < _voxel_decay;
-    const double mark_time =
-      short_life ? cur_time - (_voxel_decay - obs._voxel_decay) : cur_time;
+    const double short_time = cur_time - (_voxel_decay - obs._voxel_decay);
+    // the short life may be limited to points near the sensor (a lidar's door-frame spread is a
+    // near-range effect; far away it sees an object with only a ring or two and needs every scan)
+    const float short_range_2 = obs._voxel_decay_range >= 0.0 ?
+      static_cast<float>(obs._voxel_decay_range * obs._voxel_decay_range) :
+      std::numeric_limits<float>::max();
 
     // One accessor for the whole cloud. See MarkGridPoint.
     openvdb::DoubleGrid::Accessor accessor = _grid->getAccessor();
@@ -364,8 +370,10 @@ void SpatioTemporalVoxelGrid::operator()(
       openvdb::Vec3d mark_grid(this->WorldToIndex(
           openvdb::Vec3d(x, y, z)));
       const openvdb::Coord mark_coord(mark_grid[0], mark_grid[1], mark_grid[2]);
+      const bool short_point = short_life && distance_2 <= short_range_2;
+      const double mark_time = short_point ? short_time : cur_time;
       double held = 0.0;
-      if (short_life && accessor.probeValue(mark_coord, held) && held >= mark_time) {
+      if (short_point && accessor.probeValue(mark_coord, held) && held >= mark_time) {
         continue;
       }
 

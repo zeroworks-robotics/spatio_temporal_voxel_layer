@@ -152,6 +152,8 @@ public:
     const int & min_support, const double & tol, const double & tol_per_m, const bool & wrap_rows);
   // Lifetime of this source's marks, s, shorter than the layer's voxel_decay; negative = layer's.
   void SetVoxelDecay(const double & voxel_decay);
+  // The short life applies within range (m) of the sensor only; negative = to all points.
+  void SetVoxelDecayRange(const double & range);
   // Near-range bias of the sensor: each return is pushed out along its beam by min(k / range, max) (m),
   // horizontally only (z kept). Needs the cloud in the frame of a near-level sensor. k <= 0 = off.
   void SetRangeBias(const double & k, const double & max);
@@ -199,7 +201,7 @@ private:
   size_t EdgeFilter(
     const sensor_msgs::msg::PointCloud2 & raw, sensor_msgs::msg::PointCloud2 & out);
   // Lifetime of this source's marks, s; negative = the layer's voxel_decay. See SetVoxelDecay.
-  double _source_voxel_decay{-1.0};
+  double _source_voxel_decay{-1.0}, _source_voxel_decay_range{-1.0};
   double _range_bias_k{0.0}, _range_bias_max{0.0};
   int _edge_px{0}, _edge_min_run{4};
   size_t _edge_seen{0}, _edge_dropped{0};

@@ -112,7 +112,8 @@ struct MeasurementReading
     _clearing(obs._clearing),
     _decay_acceleration(obs._decay_acceleration),
     _model_type(obs._model_type),
-    _voxel_decay(obs._voxel_decay)
+    _voxel_decay(obs._voxel_decay),
+    _voxel_decay_range(obs._voxel_decay_range)
   {
   }
 
@@ -125,6 +126,9 @@ struct MeasurementReading
   ModelType _model_type;
   // How long this reading's marks live, s; negative = the layer's voxel_decay.
   double _voxel_decay{-1.0};
+  // _voxel_decay applies to points within this range of the sensor (m); farther ones live the
+  // layer's voxel_decay. Negative = all points.
+  double _voxel_decay_range{-1.0};
 };
 
 }  // namespace observation
