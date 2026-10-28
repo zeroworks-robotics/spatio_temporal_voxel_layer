@@ -402,8 +402,36 @@ void MeasurementBuffer::BufferROSCloud(
       _buffer.lookupTransform(
       first_frame, cloud.header.frame_id,
       tf2_ros::fromMsg(cloud.header.stamp));
-    tf2::doTransform(cloud, *cld_global, tf_stamped);
+    if (_range_bias_k > 0.0) {
+      // correct the ranges in the sensor frame, where every beam starts at the origin. Only x and y
+      // move: the height gates and the ground walk keep the heights they were tuned on, and the
+      // bias matters for where a wall is, not how high it is. Needs a sensor mounted near level.
+      sensor_msgs::msg::PointCloud2 corrected(cloud);
+      sensor_msgs::PointCloud2Iterator<float> cx(corrected, "x"), cy(corrected, "y"), cz(corrected, "z");
+      for (; cx != cx.end(); ++cx, ++cy, ++cz) {
+        const float r = std::sqrt(*cx * *cx + *cy * *cy + *cz * *cz);
+        if (!std::isfinite(r) || r < 0.05f) {
+          continue;
+        }
+        const float scale = 1.0f + static_cast<float>(std::min(_range_bias_k / r, _range_bias_max)) / r;
+        *cx *= scale;
+        *cy *= scale;
+      }
+      tf2::doTransform(corrected, *cld_global, tf_stamped);
+    } else {
+      tf2::doTransform(cloud, *cld_global, tf_stamped);
+    }
 
+    if (_edge_px > 0 && _filter != Filters::NONE) {
+      if (cloud.height <= 1) {
+        RCLCPP_WARN_ONCE(
+          logger_, "%s: edge_filter_px needs an organized cloud; %s is %ux%u. Filter off.",
+          _source_name.c_str(), _topic_name.c_str(), cloud.width, cloud.height);
+      } else {
+        EdgeFilter(cloud, *cld_global);
+        cld_global->is_dense = false;
+      }
+    }
     if (_support_min > 0 && _filter != Filters::NONE) {
       if (cloud.height <= 1) {
         RCLCPP_WARN_ONCE(
@@ -611,6 +639,113 @@ void MeasurementBuffer::SetVoxelDecay(const double & voxel_decay)
 /*****************************************************************************/
 {
   _source_voxel_decay = voxel_decay;
+}
+
+/*****************************************************************************/
+void MeasurementBuffer::SetEdgeFilter(const int & px, const int & min_run)
+/*****************************************************************************/
+{
+  _edge_px = std::max(px, 0);
+  // a surface must keep a core after both its edges go, or a thin pole would vanish
+  _edge_min_run = std::max(min_run, 2 * _edge_px + 2);
+}
+
+/*****************************************************************************/
+size_t MeasurementBuffer::EdgeFilter(
+  const sensor_msgs::msg::PointCloud2 & raw, sensor_msgs::msg::PointCloud2 & out)
+/*****************************************************************************/
+{
+  // Stereo matching widens a near surface into the far background beside it by a pixel or two
+  // ("foreground fattening"), so the side of a door jamb lands a few cm inside the opening, more
+  // the farther away it is. Drop those edge pixels along each image row, but only on surfaces wide
+  // enough to keep a core, so thin objects stay whole. Rows of the organized cloud are image rows.
+  const int W = static_cast<int>(raw.width), H = static_cast<int>(raw.height);
+  if (raw.row_step != raw.width * raw.point_step || out.row_step != out.width * out.point_step ||
+    out.width != raw.width || out.height != raw.height)
+  {
+    RCLCPP_WARN_ONCE(logger_, "%s: edge filter skipped, padded or mismatched rows", _source_name.c_str());
+    return 0;
+  }
+  const size_t n = static_cast<size_t>(W) * H;
+  const float inf = std::numeric_limits<float>::infinity();
+  std::vector<float> rng(n, inf);
+  sensor_msgs::PointCloud2ConstIterator<float> rx(raw, "x"), ry(raw, "y"), rz(raw, "z");
+  for (size_t i = 0; i < n; ++i, ++rx, ++ry, ++rz) {
+    if (std::isfinite(*rx) && std::isfinite(*ry) && std::isfinite(*rz)) {
+      const float r = std::sqrt(*rx * *rx + *ry * *ry + *rz * *rz);
+      if (r > 0.05f) {
+        rng[i] = r;
+      }
+    }
+  }
+  std::vector<uint8_t> drop(n, 0);
+  std::vector<int> run(W);
+  size_t seen = 0, dropped = 0;
+  for (int row = 0; row < H; ++row) {
+    const float * r = rng.data() + static_cast<size_t>(row) * W;
+    // width of the surface each pixel sits on: neighbours within 3 % range of each other
+    for (int c = 0; c < W; ) {
+      int e = c;
+      while (e + 1 < W && std::isfinite(r[e]) && std::isfinite(r[e + 1]) &&
+        std::fabs(r[e + 1] - r[e]) < 0.03f * r[e])
+      {
+        ++e;
+      }
+      for (int k = c; k <= e; ++k) {
+        run[k] = e - c + 1;
+      }
+      c = e + 1;
+    }
+    for (int c = 0; c < W; ++c) {
+      if (!std::isfinite(r[c])) {
+        continue;
+      }
+      ++seen;
+      if (run[c] < _edge_min_run) {
+        continue;
+      }
+      const float jump = std::max(0.05f, 0.08f * r[c]);
+      bool edge = false;
+      for (int k = 1; k <= _edge_px && !edge; ++k) {
+        // the image border is not a depth step
+        edge = (c - k >= 0 && r[c - k] > r[c] + jump) || (c + k < W && r[c + k] > r[c] + jump);
+      }
+      if (edge) {
+        drop[static_cast<size_t>(row) * W + c] = 1;
+        ++dropped;
+      }
+    }
+  }
+  sensor_msgs::PointCloud2Iterator<float> ox(out, "x"), oy(out, "y"), oz(out, "z");
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  for (size_t i = 0; i < n; ++i, ++ox, ++oy, ++oz) {
+    if (drop[i]) {
+      *ox = nan;
+      *oy = nan;
+      *oz = nan;
+    }
+  }
+  _edge_seen += seen;
+  _edge_dropped += dropped;
+  const rclcpp::Time now = clock_->now();
+  if (_edge_report_time.nanoseconds() == 0 || _edge_report_time.get_clock_type() != now.get_clock_type()) {
+    _edge_report_time = now;
+  } else if ((now - _edge_report_time).seconds() > 30.0) {
+    RCLCPP_INFO(
+      logger_, "%s: edge filter dropped %.2f%% of %zu pixels in the last 30 s", _source_name.c_str(),
+      100.0 * _edge_dropped / std::max<size_t>(_edge_seen, 1), _edge_seen);
+    _edge_seen = _edge_dropped = 0;
+    _edge_report_time = now;
+  }
+  return dropped;
+}
+
+/*****************************************************************************/
+void MeasurementBuffer::SetRangeBias(const double & k, const double & max)
+/*****************************************************************************/
+{
+  _range_bias_k = k;
+  _range_bias_max = max;
 }
 
 /*****************************************************************************/

@@ -152,6 +152,13 @@ public:
     const int & min_support, const double & tol, const double & tol_per_m, const bool & wrap_rows);
   // Lifetime of this source's marks, s, shorter than the layer's voxel_decay; negative = layer's.
   void SetVoxelDecay(const double & voxel_decay);
+  // Near-range bias of the sensor: each return is pushed out along its beam by min(k / range, max) (m),
+  // horizontally only (z kept). Needs the cloud in the frame of a near-level sensor. k <= 0 = off.
+  void SetRangeBias(const double & k, const double & max);
+  // Depth-camera edge pixels: in each image row, a pixel next (within px columns) to a much farther or
+  // missing neighbour is dropped when its surface is at least min_run pixels wide. px <= 0 = off.
+  // See EdgeFilter.
+  void SetEdgeFilter(const int & px, const int & min_run);
 
   // State knoweldge if sensors are operating as expected
   bool UpdatedAtExpectedRate(void) const;
@@ -189,8 +196,14 @@ private:
   bool FilterGroundRelative(point_cloud_ptr & cld) const;
   size_t SupportFilter(
     const sensor_msgs::msg::PointCloud2 & raw, sensor_msgs::msg::PointCloud2 & out);
+  size_t EdgeFilter(
+    const sensor_msgs::msg::PointCloud2 & raw, sensor_msgs::msg::PointCloud2 & out);
   // Lifetime of this source's marks, s; negative = the layer's voxel_decay. See SetVoxelDecay.
   double _source_voxel_decay{-1.0};
+  double _range_bias_k{0.0}, _range_bias_max{0.0};
+  int _edge_px{0}, _edge_min_run{4};
+  size_t _edge_seen{0}, _edge_dropped{0};
+  rclcpp::Time _edge_report_time{0, 0, RCL_ROS_TIME};
   int _support_min{-1};
   double _support_tol{0.03}, _support_tol_per_m{0.02};
   bool _support_wrap_rows{false};

@@ -459,6 +459,18 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
     double source_decay = -1.0;
     declareParameter(source + "." + "voxel_decay", rclcpp::ParameterValue(-1.0));
     node->get_parameter(name_ + "." + source + "." + "voxel_decay", source_decay);
+    // near-range bias: returns pushed out along the beam by min(k / range, max) (m), cloud in sensor frame
+    double range_bias_k = 0.0, range_bias_max = 0.05;
+    declareParameter(source + "." + "range_bias_k", rclcpp::ParameterValue(0.0));
+    declareParameter(source + "." + "range_bias_max", rclcpp::ParameterValue(0.05));
+    node->get_parameter(name_ + "." + source + "." + "range_bias_k", range_bias_k);
+    node->get_parameter(name_ + "." + source + "." + "range_bias_max", range_bias_max);
+    // depth-camera edge pixels along image rows (stereo widens near surfaces); 0 = off
+    int edge_px = 0, edge_min_run = 4;
+    declareParameter(source + "." + "edge_filter_px", rclcpp::ParameterValue(0));
+    declareParameter(source + "." + "edge_filter_min_run", rclcpp::ParameterValue(4));
+    node->get_parameter(name_ + "." + source + "." + "edge_filter_px", edge_px);
+    node->get_parameter(name_ + "." + source + "." + "edge_filter_min_run", edge_min_run);
     declareParameter(source + "." + "support_filter_min", rclcpp::ParameterValue(-1));
     declareParameter(source + "." + "support_filter_tol", rclcpp::ParameterValue(0.03));
     declareParameter(source + "." + "support_filter_tol_per_m", rclcpp::ParameterValue(0.02));
@@ -535,6 +547,22 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
           logger_, "%s: support filter, at least %d of 8 neighbours within %.3f + %.3f/m%s",
           source.c_str(), std::min(support_min, 7), support_tol, support_tol_per_m,
           support_wrap_rows ? ", rows wrap" : "");
+      }
+      if (edge_px > 0 && filter == buffer::Filters::NONE) {
+        RCLCPP_WARN(logger_, "%s: edge_filter_px needs a filter, ignored", source.c_str());
+      } else if (edge_px > 0) {
+        _observation_buffers.back()->SetEdgeFilter(edge_px, edge_min_run);
+        RCLCPP_INFO(logger_, "%s: edge filter, %d px, surfaces >= %d px", source.c_str(), edge_px,
+          std::max(edge_min_run, 2 * edge_px + 2));
+      }
+      if (range_bias_k > 0.0) {
+        if (!sensor_frame.empty()) {
+          RCLCPP_WARN(logger_, "%s: range_bias_k needs the cloud in the sensor frame, but sensor_frame is set; ignored",
+            source.c_str());
+        } else {
+          _observation_buffers.back()->SetRangeBias(range_bias_k, range_bias_max);
+          RCLCPP_INFO(logger_, "%s: range bias, +min(%.4f / r, %.3f) m", source.c_str(), range_bias_k, range_bias_max);
+        }
       }
       _marking_buffers.push_back(_observation_buffers.back());
     }
@@ -1170,8 +1198,12 @@ SpatioTemporalVoxelLayer::dynamicParametersCallback(std::vector<rclcpp::Paramete
     std::stringstream ss(_topics_string);
     std::string source;
     while (ss >> source) {
-      if (name == name_ + "." + source + "." + "voxel_decay") {
-        // Marks already in the grid carry the old life in their values; set it at configure time.
+      // Marks already in the grid carry the old life in their values, and the filters are set
+      // on the buffers at configure time only; refuse rather than accept and ignore.
+      static const std::vector<std::string> configure_only{"voxel_decay", "range_bias_k", "range_bias_max", "edge_filter_px", "edge_filter_min_run"};
+      if (std::any_of(configure_only.begin(), configure_only.end(),
+        [&](const std::string & key) {return name == name_ + "." + source + "." + key;}))
+      {
         result.successful = false;
         result.reason = name + " can only be set at configure time";
         return result;
