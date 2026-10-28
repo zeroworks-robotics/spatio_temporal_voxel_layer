@@ -8,21 +8,26 @@
 #   * lidar_mark.voxel_decay 0.25 within voxel_decay_range 2.5 m: door-frame spread near the lidar is
 #     forgotten fast; farther marks keep the layer's 1 s, so an object hit by only a ring or two far away
 #     still collects its marks (child-height box 4-8 m: 94-98 % with the lidar alone, robot config 96-99 %).
-#   * footprint sides 0.30 -> 0.36 m (front and back unchanged): the footprint clearing removes the spread
-#     beside the body while passing a frame; obstacles within 6 cm of either side are not shown.
-#   * lidar_mark.range_bias_k 0.025 (max 0.04): the Airy reads 1-3 cm short at 0.5-1.5 m against all three
-#     cameras on every surface; returns are pushed back out horizontally.
+#   * decay_hold_grace 0.15 / decay_hold_max 0.85: once the lidar (the short-life source) is late by more than
+#     0.15 s - a dropped scan or a stalled cycle - voxels stop ageing until it is 1.0 s late, so its near marks
+#     are not lost in a gap up to about 0.95 s; after that, ageing is exactly the normal one again.
+#   * footprint +-0.40 x +-0.30 m: the robot's body as cona_robot gives it (cona_bringup
+#     param/cona_grid_map_ranger_mini_v3.yaml); the footprint clearing must not reach past the body.
+#   * lidar_mark.range_bias_k 0.025 (max 0.025): the Airy reads 1-3 cm short at 0.5-1.5 m against all three
+#     cameras on every surface; returns are pushed back out horizontally, by at most 2.5 cm.
 #   * *_mark.edge_filter_px 1: depth cameras widen a near surface by about a pixel at a depth step; that
 #     pixel goes on surfaces 4 px or wider.
 #   * door_trim layer: at the map's door nodes, one 2 cm cell comes off the face toward the opening of
-#     each run beside the free path. Rows with anything on the node (closed door, person on the path)
+#     each run beside the free path, only where that face is wider than the cell (a thin pole or door leaf
+#     next to the jamb is kept whole). Rows with anything on the node (closed door, person on the path)
 #     are left whole. A person standing in the zone beside the path can lose that one cell too.
 #     map_file must name the site's map.json; empty = this layer off.
-#   * update 20 Hz as the robot config, publish 40 -> 20 Hz (40 Hz sent each map twice).
+#   * update 20 Hz and publish 40 Hz, as the robot config (publish 20 with update 20 sends only ~13 maps/s).
 # Replay of the 2026-10-23 recording (large clouds over shared memory, as on the robot), door width against
-# tape (median of 12 doors), before / inside / after the door: robot config -12.9 / -21.6 / -12.7 %, this
-# file -5.9 / -5.9 / -5.4 %. Closed-door moments kept 191/192 (robot config 191/191), false cells in the
-# driven path 0.4 % of costmaps (0.3 %). Orin: 1.06 cores (robot config 0.72), no missed cycle at 20 Hz.
+# tape (median of 12 doors), before / inside / after the door: the robot's own live costmap that day
+# -12.9 / -13.1 / -12.7 %, this file -6.4 / -9.0 / -5.4 %. Closed-door moments kept 191/192, false cells in
+# the driven path 0.3 % of costmaps (robot config 0.3 %), costmap 20.0 Hz. Orin (.151, 4 windows): 1.19 cores,
+# cycle mean 10-15 ms, max 43 ms, no missed cycle (robot config 0.86 cores on the same windows).
 # The lidar marks only objects taller than about 1 m (it sees from its own height up); cameras cover
 # 0.12-1.2 m within 3 m. Not tested on the robot yet.
 costmap:
@@ -33,14 +38,14 @@ costmap:
       robot_base_frame: base_link
       transform_tolerance: 1.0
       update_frequency: 20.0
-      publish_frequency: 20.0
+      publish_frequency: 40.0
       always_send_full_costmap: true
       track_unknown_space: false
       rolling_window: true
       width: 18
       height: 18
       resolution: 0.02
-      footprint: '[[0.41, 0.36], [0.41, -0.36], [-0.41, -0.36], [-0.41, 0.36]]'
+      footprint: '[[0.40, 0.30], [0.40, -0.30], [-0.40, -0.30], [-0.40, 0.30]]'
       plugins:
       - stvl_layer
       - denoise_layer
@@ -63,6 +68,8 @@ costmap:
         enabled: true
         voxel_decay: 1.0
         decay_model: 0
+        decay_hold_grace: 0.15   # lidar late by this much (10 Hz = 0.10 s) ...
+        decay_hold_max: 0.85     # ... stops voxel ageing until it is this much later still
         voxel_size: 0.02
         track_unknown_space: false
         mark_threshold: 2
@@ -244,7 +251,7 @@ costmap:
           clear_after_reading: true
         lidar_mark:
           range_bias_k: 0.025
-          range_bias_max: 0.04
+          range_bias_max: 0.025
           voxel_decay: 0.25
           voxel_decay_range: 2.5
           ground_relative_height: false
