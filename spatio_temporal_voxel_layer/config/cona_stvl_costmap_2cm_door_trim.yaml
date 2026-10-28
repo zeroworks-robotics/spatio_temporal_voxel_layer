@@ -1,0 +1,283 @@
+# Door variant of cona_stvl_costmap.yaml (the robot config), branch features/stvl_lidar_decay. Needs that branch.
+# Changes against the robot config, each aimed at door frames, measured against the field tape of 12 entrance
+# doors (0.90-1.47 m, 2026-10-27):
+#   * resolution / voxel_size 0.04 -> 0.02 m: a cell holding any part of a frame is filled whole, so the
+#     rounding loss per side halves.
+#   * *_mark.support_filter_min 1 (lidar rows wrap): a return needs a same-range neighbour in its organized
+#     cloud; single stray returns (rain, speckle) go. Camera voxel_min_points 2 -> 1 with it.
+#   * lidar_mark.voxel_decay 0.25 within voxel_decay_range 2.5 m: door-frame spread near the lidar is
+#     forgotten fast; farther marks keep the layer's 1 s, so an object hit by only a ring or two far away
+#     still collects its marks (child-height box 4-8 m: 94-98 % with the lidar alone, robot config 96-99 %).
+#   * footprint sides 0.30 -> 0.36 m (front and back unchanged): the footprint clearing removes the spread
+#     beside the body while passing a frame; obstacles within 6 cm of either side are not shown.
+#   * lidar_mark.range_bias_k 0.025 (max 0.04): the Airy reads 1-3 cm short at 0.5-1.5 m against all three
+#     cameras on every surface; returns are pushed back out horizontally.
+#   * *_mark.edge_filter_px 1: depth cameras widen a near surface by about a pixel at a depth step; that
+#     pixel goes on surfaces 4 px or wider.
+#   * door_trim layer: at the map's door nodes, one 2 cm cell comes off the face toward the opening of
+#     each run beside the free path. Rows with anything on the node (closed door, person on the path)
+#     are left whole. A person standing in the zone beside the path can lose that one cell too.
+#     map_file must name the site's map.json; empty = this layer off.
+#   * update 20 Hz as the robot config, publish 40 -> 20 Hz (40 Hz sent each map twice).
+# Replay of the 2026-10-23 recording (large clouds over shared memory, as on the robot), door width against
+# tape (median of 12 doors), before / inside / after the door: robot config -12.9 / -21.6 / -12.7 %, this
+# file -5.9 / -5.9 / -5.4 %. Closed-door moments kept 191/192 (robot config 191/191), false cells in the
+# driven path 0.4 % of costmaps (0.3 %). Orin: 1.06 cores (robot config 0.72), no missed cycle at 20 Hz.
+# The lidar marks only objects taller than about 1 m (it sees from its own height up); cameras cover
+# 0.12-1.2 m within 3 m. Not tested on the robot yet.
+costmap:
+  costmap:
+    ros__parameters:
+      use_sim_time: false
+      global_frame: odom
+      robot_base_frame: base_link
+      transform_tolerance: 1.0
+      update_frequency: 20.0
+      publish_frequency: 20.0
+      always_send_full_costmap: true
+      track_unknown_space: false
+      rolling_window: true
+      width: 18
+      height: 18
+      resolution: 0.02
+      footprint: '[[0.41, 0.36], [0.41, -0.36], [-0.41, -0.36], [-0.41, 0.36]]'
+      plugins:
+      - stvl_layer
+      - denoise_layer
+      - door_trim
+      door_trim:
+        plugin: spatio_temporal_voxel_layer/DoorTrimLayer
+        enabled: true
+        map_file: ''   # set to the site's map.json, the one cona loads; empty = layer off
+        map_frame: map
+        place_types: [gate_private, gate_public]
+        floor: 1
+        require_zone_edge: false
+        trim: 0.02
+        zone_half_depth: 0.8
+        zone_half_width: 1.0
+        min_wall_run: 0.10
+        bridge_gap: 0.04
+      stvl_layer:
+        plugin: spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer
+        enabled: true
+        voxel_decay: 1.0
+        decay_model: 0
+        voxel_size: 0.02
+        track_unknown_space: false
+        mark_threshold: 2
+        update_footprint_enabled: true
+        combination_method: 0
+        origin_z: 0.0
+        publish_voxel_map: false
+        transform_tolerance: 1.0
+        topic_fallback_wait: 3.0
+        topic_fallback_suffix: _deskewed
+        ground_relative_height: true
+        ground_min_obstacle_height: 0.05
+        ground_seed_z_tol: 0.1
+        ground_seed_z_tol_per_m: 0.0
+        ground_seed_gravity_aligned: true
+        ground_max_grade_deg: 20.0
+        ground_height_tol: 0.02
+        ground_height_tol_per_m: 0.01
+        mapping_mode: false
+        map_save_duration: 60.0
+        observation_sources: 'front_mark front_clear left_mark left_clear right_mark
+          right_clear fdown_mark fdown_clear back_mark back_clear lidar_mark lidar_clear
+
+          '
+        front_mark:
+          edge_filter_px: 1
+          edge_filter_min_run: 4
+          ground_reference_use: true
+          data_type: PointCloud2
+          topic: /camera_frontRGBD/depth/points
+          marking: true
+          clearing: false
+          obstacle_range: 3.0
+          min_obstacle_height: 0.12
+          max_obstacle_height: 1.2
+          height_filter_frame: base_link
+          expected_update_rate: 0.0
+          observation_persistence: 0.0
+          inf_is_valid: false
+          filter: voxel
+          voxel_min_points: 1
+          clear_after_reading: true
+          support_filter_min: 1
+        front_clear:
+          data_type: PointCloud2
+          topic: /camera_frontRGBD/depth/points
+          marking: false
+          clearing: true
+          min_z: 0.1
+          max_z: 4.0
+          vertical_fov_angle: 1.1472
+          horizontal_fov_angle: 1.4222
+          decay_acceleration: 0.0
+          model_type: 0
+          clear_after_reading: true
+        left_mark:
+          edge_filter_px: 1
+          edge_filter_min_run: 4
+          ground_reference_use: true
+          data_type: PointCloud2
+          topic: /camera_leftRGBD/depth/points
+          marking: true
+          clearing: false
+          obstacle_range: 3.0
+          min_obstacle_height: 0.12
+          max_obstacle_height: 1.2
+          height_filter_frame: base_link
+          expected_update_rate: 0.0
+          observation_persistence: 0.0
+          inf_is_valid: false
+          filter: voxel
+          voxel_min_points: 1
+          clear_after_reading: true
+          support_filter_min: 1
+        left_clear:
+          data_type: PointCloud2
+          topic: /camera_leftRGBD/depth/points
+          marking: false
+          clearing: true
+          min_z: 0.1
+          max_z: 4.0
+          vertical_fov_angle: 1.1376
+          horizontal_fov_angle: 1.4117
+          decay_acceleration: 0.0
+          model_type: 0
+          clear_after_reading: true
+        right_mark:
+          edge_filter_px: 1
+          edge_filter_min_run: 4
+          ground_reference_use: true
+          data_type: PointCloud2
+          topic: /camera_rightRGBD/depth/points
+          marking: true
+          clearing: false
+          obstacle_range: 3.0
+          min_obstacle_height: 0.12
+          max_obstacle_height: 1.2
+          height_filter_frame: base_link
+          expected_update_rate: 0.0
+          observation_persistence: 0.0
+          inf_is_valid: false
+          filter: voxel
+          voxel_min_points: 1
+          clear_after_reading: true
+          support_filter_min: 1
+        right_clear:
+          data_type: PointCloud2
+          topic: /camera_rightRGBD/depth/points
+          marking: false
+          clearing: true
+          min_z: 0.1
+          max_z: 4.0
+          vertical_fov_angle: 1.13
+          horizontal_fov_angle: 1.4035
+          decay_acceleration: 0.0
+          model_type: 0
+          clear_after_reading: true
+        back_mark:
+          edge_filter_px: 1
+          edge_filter_min_run: 4
+          ground_reference_use: true
+          data_type: PointCloud2
+          topic: /camera_rearRGBD/depth/points
+          marking: true
+          clearing: false
+          obstacle_range: 3.0
+          min_obstacle_height: 0.12
+          max_obstacle_height: 1.2
+          height_filter_frame: base_link
+          expected_update_rate: 0.0
+          observation_persistence: 0.0
+          inf_is_valid: false
+          filter: voxel
+          voxel_min_points: 1
+          clear_after_reading: true
+          support_filter_min: 1
+        back_clear:
+          data_type: PointCloud2
+          topic: /camera_rearRGBD/depth/points
+          marking: false
+          clearing: true
+          min_z: 0.1
+          max_z: 4.0
+          vertical_fov_angle: 1.1494
+          horizontal_fov_angle: 1.4246
+          decay_acceleration: 0.0
+          model_type: 0
+          clear_after_reading: true
+        fdown_mark:
+          edge_filter_px: 1
+          edge_filter_min_run: 4
+          ground_reference_publish: true
+          data_type: PointCloud2
+          topic: /camera_fdownRGBD/depth/points
+          marking: true
+          clearing: false
+          obstacle_range: 2.5
+          min_obstacle_height: 0.12
+          max_obstacle_height: 1.2
+          height_filter_frame: base_link
+          expected_update_rate: 0.0
+          observation_persistence: 0.0
+          inf_is_valid: false
+          filter: voxel
+          voxel_min_points: 1
+          clear_after_reading: true
+          support_filter_min: 1
+        fdown_clear:
+          data_type: PointCloud2
+          topic: /camera_fdownRGBD/depth/points
+          marking: false
+          clearing: true
+          min_z: 0.1
+          max_z: 3.0
+          vertical_fov_angle: 1.1274
+          horizontal_fov_angle: 1.4006
+          decay_acceleration: 0.0
+          model_type: 0
+          clear_after_reading: true
+        lidar_mark:
+          range_bias_k: 0.025
+          range_bias_max: 0.04
+          voxel_decay: 0.25
+          voxel_decay_range: 2.5
+          ground_relative_height: false
+          data_type: PointCloud2
+          topic: /rslidar_points_deskewed
+          marking: true
+          clearing: false
+          obstacle_range: 14.0
+          min_obstacle_height: 0.08
+          max_obstacle_height: 1.5
+          height_filter_frame: base_link
+          expected_update_rate: 0.0
+          observation_persistence: 0.0
+          inf_is_valid: false
+          filter: voxel
+          voxel_min_points: 1
+          clear_after_reading: true
+          support_filter_min: 1
+          support_filter_wrap_rows: true
+        lidar_clear:
+          data_type: PointCloud2
+          topic: /rslidar_points_deskewed
+          marking: false
+          clearing: true
+          min_z: 0.2
+          max_z: 15.0
+          vertical_fov_angle: 1.5708
+          horizontal_fov_angle: 6.2832
+          decay_acceleration: 0.0
+          model_type: 1
+          clear_after_reading: true
+      denoise_layer:
+        plugin: nav2_costmap_2d::DenoiseLayer
+        enabled: true
+        minimal_group_size: 3
+        group_connectivity_type: 8
