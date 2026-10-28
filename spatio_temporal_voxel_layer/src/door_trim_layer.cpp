@@ -241,6 +241,8 @@ void DoorTrimLayer::TrimDoor(
   bool any_cut = false;
   for (int si = 0; si < ns; ++si) {
     uint8_t * row = occ.data() + static_cast<size_t>(si) * (nl + 1);
+    // the row before bridging: only a face that is really there may lose its inner bins
+    const std::vector<uint8_t> orig(row, row + nl + 1);
     // a frame's ragged edge reads as one run: bridge free gaps up to bridge bins
     int prev = -1;
     for (int li = 0; li <= nl; ++li) {
@@ -264,11 +266,21 @@ void DoorTrimLayer::TrimDoor(
       ++b;
     }
     uint8_t * cut_row = cut.data() + static_cast<size_t>(si) * (nl + 1);
+    // Trim a side only when the unbridged segment at its inner face is wider than the trim, so
+    // at least one bin of it stays. A thin object (a pole, a door leaf) within the bridge gap
+    // of the jamb would otherwise be joined to the jamb and become the bin that is cut away.
+    auto face_kept = [&](int edge, int step) {
+        int seg = 0;
+        for (int li = edge; li >= 0 && li <= nl && orig[li]; li += step) {
+          ++seg;
+        }
+        return seg > k;
+      };
     int run = 0;
     while (a - 1 - run >= 0 && row[a - 1 - run]) {
       ++run;
     }
-    if (run >= kmin && (!_require_zone_edge || a - run == 0)) {
+    if (run >= kmin && (!_require_zone_edge || a - run == 0) && face_kept(a - 1, -1)) {
       for (int li = std::max(a - k, 0); li < a; ++li) {
         cut_row[li] = 1;
         any_cut = true;
@@ -278,7 +290,7 @@ void DoorTrimLayer::TrimDoor(
     while (b + 1 + run <= nl && row[b + 1 + run]) {
       ++run;
     }
-    if (run >= kmin && (!_require_zone_edge || b + run == nl)) {
+    if (run >= kmin && (!_require_zone_edge || b + run == nl) && face_kept(b + 1, 1)) {
       for (int li = b + 1; li <= std::min(b + k, nl); ++li) {
         cut_row[li] = 1;
         any_cut = true;
