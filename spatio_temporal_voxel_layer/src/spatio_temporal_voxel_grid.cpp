@@ -195,7 +195,21 @@ void SpatioTemporalVoxelGrid::TemporalClearAndGenerateCostmap(
 /*****************************************************************************/
 {
   // sample time once for all clearing readings
-  const double cur_time = _clock->now().seconds();
+  double cur_time = _clock->now().seconds();
+  // decay hold: while the short-life sources are late, age voxels only up to their last
+  // mark plus the grace. Once they are late by more than hold_max the hold ends and ageing
+  // is exactly the old one again, so a dead sensor does not lengthen every mark's life.
+  if (_hold_max > 0.0 && _last_short_mark >= 0.0) {
+    const double late = cur_time - _last_short_mark - _hold_grace;
+    if (late > 0.0 && late <= _hold_max) {
+      cur_time -= late;
+      _hold_released = false;
+    } else if (late > _hold_max && !_hold_released) {
+      _hold_released = true;
+      std::cout << "STVL decay hold released: short-life marks " << late + _hold_grace <<
+        " s late" << std::endl;
+    }
+  }
 
   // One accessor for the whole traversal. See MarkGridPoint for why.
   openvdb::DoubleGrid::Accessor accessor = _grid->getAccessor();
@@ -222,8 +236,10 @@ void SpatioTemporalVoxelGrid::TemporalClearAndGenerateCostmap(
       if (frustum_it->frustum->IsInside(pose_world) ) {
         frustum_cycle = true;
 
+        // a mark newer than the (possibly held) clock has no age yet; a negative age would
+        // make the acceleration push its stamp further ahead every cycle
         const double frustum_acceleration = GetFrustumAcceleration(
-          time_since_marking, frustum_it->accel_factor);
+          std::max(time_since_marking, 0.0), frustum_it->accel_factor);
 
         const double time_until_decay = base_duration_to_decay -
           frustum_acceleration;
@@ -323,6 +339,26 @@ void SpatioTemporalVoxelGrid::Mark(
       (*this)(marking_readings.at(i));
     }
   }
+
+  // remember when a short-life source last marked, for the decay hold
+  const bool short_marked = std::any_of(
+    marking_readings.begin(), marking_readings.end(),
+    [this](const observation::MeasurementReading & obs) {
+      return obs._marking && _decay_model == LINEAR && obs._voxel_decay >= 0.0 &&
+             obs._voxel_decay < _voxel_decay;
+    });
+  if (short_marked) {
+    _last_short_mark = _clock->now().seconds();
+  }
+}
+
+/*****************************************************************************/
+void SpatioTemporalVoxelGrid::SetDecayHold(const double & grace, const double & hold_max)
+/*****************************************************************************/
+{
+  boost::unique_lock<boost::mutex> lock(_grid_lock);
+  _hold_grace = std::max(grace, 0.0);
+  _hold_max = std::max(hold_max, 0.0);
 }
 
 /*****************************************************************************/

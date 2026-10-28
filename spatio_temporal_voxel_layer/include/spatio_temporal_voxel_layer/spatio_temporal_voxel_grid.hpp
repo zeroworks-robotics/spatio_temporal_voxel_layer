@@ -163,6 +163,14 @@ public:
   // tallest source configured today, so the counter cannot come near overflowing.
   const std::vector<uint16_t> & GetFlattenedCostmap() const;
 
+  // Hold the decay clock while the short-life sources are late: once no short-life mark has
+  // come for longer than grace seconds, voxels stop ageing, until the source is late by more
+  // than hold_max; then ageing is the normal one again.
+  // A short-life source's marks are written back-dated, so without this a lidar gap (or a
+  // stalled update cycle) a little longer than its life erases every near mark it made.
+  // hold_max 0 turns it off.
+  void SetDecayHold(const double & grace, const double & hold_max);
+
   // Clear the grid
   bool ResetGrid(void);
   void ResetGridArea(const occupany_cell & start, const occupany_cell & end, bool invert_area=false);
@@ -217,6 +225,9 @@ protected:
   unsigned int _costmap_size_x, _costmap_size_y;
   boost::mutex _grid_lock;
   int _prune_counter{0};
+  // decay hold (SetDecayHold): settings and the clock time of the last short-life mark
+  double _hold_grace{0.0}, _hold_max{0.0}, _last_short_mark{-1.0};
+  bool _hold_released{false};   // the hold ran out for the current silence (logged once)
 };
 
 }  // namespace volume_grid

@@ -284,6 +284,20 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
     node->get_clock(), _voxel_size, static_cast<double>(default_value_), _decay_model,
     _voxel_decay, _publish_voxels);
 
+  // decay hold: while the short-life sources (a source's voxel_decay below the layer's) are
+  // late by more than decay_hold_grace, voxels stop ageing, for at most decay_hold_max (0 = off)
+  double hold_grace = 0.15, hold_max = 0.0;
+  declareParameter("decay_hold_grace", rclcpp::ParameterValue(0.15));
+  node->get_parameter(name_ + ".decay_hold_grace", hold_grace);
+  declareParameter("decay_hold_max", rclcpp::ParameterValue(0.0));
+  node->get_parameter(name_ + ".decay_hold_max", hold_max);
+  _voxel_grid->SetDecayHold(hold_grace, hold_max);
+  if (hold_max > 0.0) {
+    RCLCPP_INFO(
+      logger_, "%s: decay held up to %.2f s once short-life marks are %.2f s late",
+      getName().c_str(), hold_max, hold_grace);
+  }
+
   matchSize();
 
   // One reference for the whole layer, so the buffers created below share it.
@@ -1201,13 +1215,21 @@ SpatioTemporalVoxelLayer::dynamicParametersCallback(std::vector<rclcpp::Paramete
     const auto & type = parameter.get_type();
     const auto & name = parameter.get_name();
 
+    // the decay hold is handed to the grid at configure time only
+    if (name == name_ + ".decay_hold_grace" || name == name_ + ".decay_hold_max") {
+      result.successful = false;
+      result.reason = name + " can only be set at configure time";
+      return result;
+    }
+
     std::stringstream ss(_topics_string);
     std::string source;
     while (ss >> source) {
       // Marks already in the grid carry the old life in their values, and the filters are set
       // on the buffers at configure time only; refuse rather than accept and ignore.
       static const std::vector<std::string> configure_only{"voxel_decay", "voxel_decay_range", "range_bias_k",
-        "range_bias_max", "edge_filter_px", "edge_filter_min_run"};
+        "range_bias_max", "edge_filter_px", "edge_filter_min_run", "support_filter_min", "support_filter_tol",
+        "support_filter_tol_per_m", "support_filter_wrap_rows"};
       if (std::any_of(configure_only.begin(), configure_only.end(),
         [&](const std::string & key) {return name == name_ + "." + source + "." + key;}))
       {
