@@ -38,6 +38,7 @@
  *********************************************************************/
 
 #include <chrono>
+#include <cmath>
 #include <string>
 #include <unordered_map>
 #include <memory>
@@ -228,6 +229,30 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
   // number of voxels per vertical needed to have obstacle
   declareParameter("mark_threshold", rclcpp::ParameterValue(0));
   node->get_parameter(name_ + ".mark_threshold", _mark_threshold);
+  // Far columns need fewer voxels. A lidar return far away is too sparse to stack two voxels in one
+  // fine column: at 2 cm, past about 3 m one ring cannot put two points in a cell, so a threshold of
+  // 2 silently caps the lidar's range. Beyond mark_threshold_far_range of a point
+  // mark_threshold_far_centre_x ahead of the robot origin (the lidar's mount, so the range follows
+  // the beams) mark_threshold_far applies; inside it mark_threshold is untouched. Only a lower far
+  // threshold is used; range <= 0 = off. The count is per column over all sources, so camera voxels
+  // beyond the range need only the far threshold too.
+  declareParameter("mark_threshold_far", rclcpp::ParameterValue(-1));
+  node->get_parameter(name_ + ".mark_threshold_far", _far_mark_threshold);
+  declareParameter("mark_threshold_far_range", rclcpp::ParameterValue(-1.0));
+  node->get_parameter(name_ + ".mark_threshold_far_range", _far_mark_range);
+  declareParameter("mark_threshold_far_centre_x", rclcpp::ParameterValue(0.0));
+  node->get_parameter(name_ + ".mark_threshold_far_centre_x", _far_mark_centre_x);
+  if (_far_mark_range > 0.0 && _far_mark_threshold >= 0) {
+    if (_far_mark_threshold < _mark_threshold) {
+      RCLCPP_INFO(
+        logger_, "%s: mark threshold %d within %.2f m of x %.3f m on the robot, %d beyond",
+        getName().c_str(), _mark_threshold, _far_mark_range, _far_mark_centre_x, _far_mark_threshold);
+    } else {
+      RCLCPP_WARN(
+        logger_, "%s: mark_threshold_far %d is not below mark_threshold %d, ignored",
+        getName().c_str(), _far_mark_threshold, _mark_threshold);
+    }
+  }
   // clear under robot footprint
   declareParameter("update_footprint_enabled", rclcpp::ParameterValue(true));
   node->get_parameter(name_ + ".update_footprint_enabled", _update_footprint_enabled);
@@ -1033,9 +1058,27 @@ void SpatioTemporalVoxelLayer::UpdateROSCostmap(
   const std::vector<uint16_t> & columns = _voxel_grid->GetFlattenedCostmap();
   const size_t cells = static_cast<size_t>(size_x_) * static_cast<size_t>(size_y_);
   if (columns.size() == cells) {
-    const uint16_t threshold = static_cast<uint16_t>(std::max(_mark_threshold, 0));
+    // read once: the parameter callback may change these while this cycle runs
+    const int near_param = _mark_threshold, far_param = _far_mark_threshold;
+    const double range = _far_mark_range;
+    const uint16_t threshold = static_cast<uint16_t>(std::max(near_param, 0));
+    // counts are summed over all marking sources, so the far threshold holds for cameras as well
+    const bool gated = range > 0.0 && far_param >= 0 && far_param < near_param;
+    const uint16_t far_threshold = gated ? static_cast<uint16_t>(far_param) : threshold;
+    const double range_2 = range * range;
     for (size_t i = 0; i < cells; ++i) {
-      if (columns[i] >= threshold && columns[i] > 0) {
+      const uint16_t count = columns[i];
+      if (count == 0 || count < far_threshold) {
+        continue;
+      }
+      // between the two thresholds only: is the cell centre beyond the range?
+      bool lethal = count >= threshold;
+      if (!lethal) {
+        const double dx = origin_x_ + (static_cast<double>(i % size_x_) + 0.5) * resolution_ - _far_centre_wx;
+        const double dy = origin_y_ + (static_cast<double>(i / size_x_) + 0.5) * resolution_ - _far_centre_wy;
+        lethal = dx * dx + dy * dy > range_2;
+      }
+      if (lethal) {
         costmap_[i] = nav2_costmap_2d::LETHAL_OBSTACLE;
       }
     }
@@ -1142,6 +1185,8 @@ void SpatioTemporalVoxelLayer::updateBounds(
   _phase_ms[1] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tm0).count();
 
   // update the ROS Layered Costmap
+  _far_centre_wx = robot_x + _far_mark_centre_x * std::cos(robot_yaw);
+  _far_centre_wy = robot_y + _far_mark_centre_x * std::sin(robot_yaw);
   const auto tu0 = std::chrono::steady_clock::now();
   UpdateROSCostmap(min_x, min_y, max_x, max_y);
   _phase_ms[2] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tu0).count();
@@ -1332,6 +1377,15 @@ SpatioTemporalVoxelLayer::dynamicParametersCallback(std::vector<rclcpp::Paramete
     if (type == ParameterType::PARAMETER_INTEGER) {
       if (name == name_ + "." + "mark_threshold") {
         _mark_threshold = parameter.as_int();
+      } else if (name == name_ + "." + "mark_threshold_far") {
+        _far_mark_threshold = parameter.as_int();
+      }
+    }
+    if (type == ParameterType::PARAMETER_DOUBLE) {
+      if (name == name_ + "." + "mark_threshold_far_range") {
+        _far_mark_range = parameter.as_double();
+      } else if (name == name_ + "." + "mark_threshold_far_centre_x") {
+        _far_mark_centre_x = parameter.as_double();
       }
     }
   }

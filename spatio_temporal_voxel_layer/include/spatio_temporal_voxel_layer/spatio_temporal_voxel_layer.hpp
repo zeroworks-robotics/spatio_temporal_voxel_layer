@@ -199,6 +199,11 @@ private:
   size_t _cycle_count{0};
   std::chrono::steady_clock::time_point _cycle_log_time{};
   int _combination_method, _mark_threshold;
+  // range-gated threshold: beyond _far_mark_range of a centre _far_mark_centre_x ahead of the
+  // robot origin, a column needs _far_mark_threshold voxels instead (range <= 0 = off)
+  int _far_mark_threshold{-1};
+  double _far_mark_range{-1.0}, _far_mark_centre_x{0.0};
+  double _far_centre_wx{0.0}, _far_centre_wy{0.0};
   volume_grid::GlobalDecayModel _decay_model;
   bool _update_footprint_enabled, _enabled;
   std::vector<geometry_msgs::msg::Point> _transformed_footprint;

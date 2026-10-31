@@ -113,6 +113,9 @@ rgbd_obstacle_layer:
   observation_persistence: 0.0  #seconds
   max_obstacle_height:   2.0    #meters
   mark_threshold:        0      #voxel height
+  mark_threshold_far:    -1     #voxel height beyond mark_threshold_far_range, used only if lower (-1 = off)
+  mark_threshold_far_range: -1.0  #meters from the centre below (<= 0 = off); write 2.5 or 3.0, not 3 (a double)
+  mark_threshold_far_centre_x: 0.0  #meters ahead of the robot origin (e.g. the lidar mount)
   update_footprint_enabled: true
   combination_method:    1      #1=max, 0=override
   obstacle_range:        3.0    #meters
