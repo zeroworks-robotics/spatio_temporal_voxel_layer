@@ -55,6 +55,7 @@
 // voxel grid
 #include "spatio_temporal_voxel_layer/spatio_temporal_voxel_grid.hpp"
 #include "spatio_temporal_voxel_layer/ground_reference.hpp"
+#include "spatio_temporal_voxel_layer/door_zones.hpp"
 // ROS
 #include "rclcpp/rclcpp.hpp"
 #include "rcl_interfaces/msg/set_parameters_result.hpp"
@@ -187,6 +188,10 @@ private:
   std::unique_ptr<rclcpp::Duration> _map_save_duration;
   rclcpp::Time _last_map_save_time;
   std::string _global_frame;
+  // Door zones of the map for the sources' door trust rule (door_zones.* parameters); the list is
+  // fixed after configure and shared read-only with the buffers.
+  buffer::door_list_ptr _door_nodes;
+  buffer::DoorZoneParams _door_zone_params;
   // Fallback for a source pointed at a processed topic whose producer may not be running.
   // See ResolveSourceTopic in the .cpp.
   double _topic_fallback_wait{3.0};

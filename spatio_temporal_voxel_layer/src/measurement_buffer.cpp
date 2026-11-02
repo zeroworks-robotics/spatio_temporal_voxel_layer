@@ -44,7 +44,9 @@
 #include "tf2_sensor_msgs/tf2_sensor_msgs.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <limits>
+#include <unordered_set>
 #include <utility>
 
 namespace buffer
@@ -446,6 +448,18 @@ void MeasurementBuffer::BufferROSCloud(
       }
     }
 
+    // Door ray trust (lidar). Runs on the organized cloud in height_filter_frame, after the support
+    // filter so a stray return cannot become a face. When it ran, the upper band it kept must pass
+    // the z band below; when it did not (no door near, no map pose), nothing changed and the band is
+    // exactly today's.
+    bool trust_applied = false;
+    if (_door_trust.enabled && _door_trust_on) {
+      trust_applied = DoorTrustFilter(*cld_global, tf_stamped, cloud.header.stamp, cloud.header.frame_id);
+      if (trust_applied) {
+        cld_global->is_dense = false;
+      }
+    }
+
     // Ground-relative height gating. Replaces the fixed band below with the same band
     // measured from the ground found under each point, so a ramp's own surface is
     // ground rather than a 0.5 m obstacle. Runs here because this is the last point at
@@ -498,7 +512,7 @@ void MeasurementBuffer::BufferROSCloud(
     const double band_min = ground_gated ? -std::numeric_limits<double>::infinity()
                                          : _min_obstacle_height;
     const double band_max = ground_gated ? std::numeric_limits<double>::infinity()
-                                         : _max_obstacle_height;
+                                         : (trust_applied ? std::nextafter(_door_trust.up_max, 0.0) : _max_obstacle_height);
 
     // remove points that are below or above our height restrictions, and
     // in the same time, remove NaNs and if user wants to use it, combine with a
@@ -776,6 +790,292 @@ void MeasurementBuffer::SetRangeBias(const double & k, const double & max)
 {
   _range_bias_k = k;
   _range_bias_max = max;
+}
+
+/*****************************************************************************/
+void MeasurementBuffer::SetDoorTrust(
+  const DoorTrustParams & params, const DoorZoneParams & zones, door_list_ptr doors)
+/*****************************************************************************/
+{
+  _door_trust = params;
+  _door_trust.margin = std::max(_door_trust.margin, 0.0);
+  _door_trust.depth = std::max(_door_trust.depth, _door_trust.margin);
+  _door_trust.range = std::max(_door_trust.range, 0.0);
+  _door_trust.az_bin_deg = std::min(std::max(_door_trust.az_bin_deg, 0.1), 45.0);
+  // pooling more than half the circle would make every bin the same face
+  const int nbin = std::max(1, static_cast<int>(std::lround(360.0 / _door_trust.az_bin_deg)));
+  _door_trust.az_neighbours = std::min(std::max(_door_trust.az_neighbours, 0), nbin / 2);
+  _door_trust.low_cap_depth = std::min(std::max(_door_trust.low_cap_depth, 0.0), _door_trust.depth);
+  _door_zone = zones;
+  _doors = doors;
+}
+
+/*****************************************************************************/
+bool MeasurementBuffer::DoorTrustFilter(
+  sensor_msgs::msg::PointCloud2 & cld, const geometry_msgs::msg::TransformStamped & cloud_to_filter,
+  const builtin_interfaces::msg::Time & stamp, const std::string & cloud_frame)
+/*****************************************************************************/
+{
+  // ranges are measured from cloud_to_filter's translation, which is the sensor only while the
+  // cloud comes in its own frame (configure checks sensor_frame; a driver or a fallback topic
+  // publishing in the robot's frame would move the origin without warning)
+  if (cloud_frame == _height_filter_frame || cloud_frame == _global_frame || cloud_frame == _door_zone.map_frame) {
+    RCLCPP_WARN_ONCE(
+      logger_, "%s: door trust needs the cloud in the sensor frame, got %s; off", _source_name.c_str(),
+      cloud_frame.c_str());
+    return false;
+  }
+  // The Airy reads a surface it meets head-on within about 1.3 m a few cm short, more so near the
+  // sensor's own height, so a door jamb lands 2..8 cm inside the opening in the band the costmap
+  // marks (base 0.08..1.5 m). The same jamb seen by the rings above (1.5..1.8 m, farther along the
+  // beam and steeper) reads where it is. A jamb is the same width at every height, so in a door
+  // zone a lower point that is nearer than the upper face in its azimuth by more than margin and
+  // less than depth is not trusted and is not marked; the upper band is marked there instead. No
+  // point is moved. Nothing taller behind a lower point (a child, a box, a person in the opening)
+  // leaves it as it is; a lower point more than depth nearer is another object and stays too.
+  ++_dt_clouds;
+  const auto report = [this]() {
+      const rclcpp::Time now = clock_->now();
+      if (_dt_report_time.nanoseconds() == 0 || _dt_report_time.get_clock_type() != now.get_clock_type()) {
+        _dt_report_time = now;
+      } else if ((now - _dt_report_time).seconds() > 30.0) {
+        RCLCPP_INFO(
+          logger_, "%s: door trust ran on %zu of %zu clouds in the last 30 s (skipped: no map pose %zu, "
+          "map pose too old %zu, no door near %zu); lower points in the zones %zu, not trusted %.1f%%, "
+          "upper points marked %zu", _source_name.c_str(), _dt_applied, _dt_clouds, _dt_skip_tf,
+          _dt_skip_age, _dt_skip_far, _dt_low_seen,
+          100.0 * _dt_low_dropped / std::max<size_t>(_dt_low_seen, 1), _dt_up_marked);
+        _dt_clouds = _dt_applied = _dt_skip_tf = _dt_skip_age = _dt_skip_far = 0;
+        _dt_low_seen = _dt_low_dropped = _dt_up_marked = 0;
+        _dt_report_time = now;
+      }
+    };
+  if (!_doors || _doors->empty()) {
+    ++_dt_skip_far;
+    report();
+    return false;
+  }
+  // map -> filter frame = (global -> filter frame at the cloud's time) * (map -> global, latest).
+  // map -> global comes from the localizer and lags the lidar, so it is taken at its latest and
+  // checked for age rather than looked up at the cloud's time, which would fail on most clouds.
+  tf2::Transform map_to_filter;
+  try {
+    const geometry_msgs::msg::TransformStamped map_to_global =
+      _buffer.lookupTransform(_global_frame, _door_zone.map_frame, tf2::TimePointZero);
+    const geometry_msgs::msg::TransformStamped global_to_filter =
+      _buffer.lookupTransform(_height_filter_frame, _global_frame, tf2_ros::fromMsg(stamp));
+    const rclcpp::Time now = clock_->now();
+    const rclcpp::Time map_stamp(map_to_global.header.stamp, now.get_clock_type());
+    if (map_stamp.nanoseconds() > 0 && std::fabs((now - map_stamp).seconds()) > _door_zone.max_tf_age) {
+      ++_dt_skip_age;
+      RCLCPP_WARN_THROTTLE(
+        logger_, *clock_, 5000, "%s: %s pose is %.1f s old, door trust off for now", _source_name.c_str(),
+        _door_zone.map_frame.c_str(), (now - map_stamp).seconds());
+      report();
+      return false;
+    }
+    tf2::Transform a, b;
+    tf2::fromMsg(map_to_global.transform, a);
+    tf2::fromMsg(global_to_filter.transform, b);
+    map_to_filter = b * a;
+  } catch (const tf2::TransformException & e) {
+    ++_dt_skip_tf;
+    RCLCPP_WARN_THROTTLE(
+      logger_, *clock_, 5000, "%s: no %s pose, door trust off for now: %s", _source_name.c_str(),
+      _door_zone.map_frame.c_str(), e.what());
+    report();
+    return false;
+  }
+
+  // doors within reach of the lidar, in the filter frame: position, travel direction u, across n
+  struct Zone
+  {
+    double px, py, ux, uy;
+  };
+  const double ox = cloud_to_filter.transform.translation.x, oy = cloud_to_filter.transform.translation.y;
+  const double hw = _door_zone.half_width, hd = _door_zone.half_depth;
+  const double range_up = _door_trust.range + _door_trust.depth;
+  // the upper band's zone grows by depth (a face up to depth behind a dropped point) plus the
+  // sideways reach of the pooled azimuth bins at range_up, so a jamb at the zone edge keeps its column
+  const double grow = _door_trust.depth +
+    range_up * std::tan((_door_trust.az_neighbours + 1) * _door_trust.az_bin_deg * M_PI / 180.0);
+  const double reach = std::hypot(hw + grow, hd + grow) + range_up;
+  std::vector<Zone> zones;
+  for (const auto & d : *_doors) {
+    const tf2::Vector3 p = map_to_filter * tf2::Vector3(d.x, d.y, 0.0);
+    if (std::hypot(p.x() - ox, p.y() - oy) > reach) {
+      continue;
+    }
+    tf2::Vector3 u = map_to_filter.getBasis() * tf2::Vector3(d.ux, d.uy, 0.0);
+    const double len = std::hypot(u.x(), u.y());
+    if (len < 1e-6) {
+      continue;
+    }
+    zones.push_back({p.x(), p.y(), u.x() / len, u.y() / len});
+  }
+  if (zones.empty()) {
+    ++_dt_skip_far;
+    report();
+    return false;
+  }
+  const auto in_zone = [&zones, hw, hd](const double x, const double y, const double grow) {
+      for (const auto & z : zones) {
+        const double dx = x - z.px, dy = y - z.py;
+        const double s = dx * z.ux + dy * z.uy, l = -dx * z.uy + dy * z.ux;
+        if (std::fabs(s) <= hd + grow && std::fabs(l) <= hw + grow) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+  // pass 1: per azimuth bin, the nearest upper-band return (the face) and the nearest lower-band
+  // return, both within range_up. Neither is gated on the zones: a surface is a surface. The Airy's
+  // azimuth jitters by a few degrees across rings, which the pooled neighbour bins absorb. The
+  // band limit is inclusive below (z == max_obstacle_height is lower), as the z band keeps it today.
+  const double low_max = _max_obstacle_height, up_max = _door_trust.up_max;
+  const int nbin = std::max(1, static_cast<int>(std::lround(360.0 / _door_trust.az_bin_deg)));
+  const double bin_scale = nbin / 360.0;
+  const float inf = std::numeric_limits<float>::infinity();
+  std::vector<float> face(nbin, inf), low_min(nbin, inf);
+  const auto bin_of = [&](const double dx, const double dy) {
+      const int b = static_cast<int>(std::floor((std::atan2(dy, dx) * 180.0 / M_PI + 180.0) * bin_scale));
+      return ((b % nbin) + nbin) % nbin;
+    };
+  {
+    sensor_msgs::PointCloud2ConstIterator<float> x(cld, "x"), y(cld, "y"), z(cld, "z");
+    for (; x != x.end(); ++x, ++y, ++z) {
+      if (!std::isfinite(*x) || !std::isfinite(*y) || !std::isfinite(*z) || *z <= _min_obstacle_height ||
+        *z >= up_max)
+      {
+        continue;
+      }
+      const double dx = *x - ox, dy = *y - oy, rh = std::sqrt(dx * dx + dy * dy);
+      if (rh <= 0.05 || rh >= range_up) {
+        continue;
+      }
+      float & f = (*z > low_max ? face : low_min)[bin_of(dx, dy)];
+      f = std::min(f, static_cast<float>(rh));
+    }
+  }
+  const auto pool = [&](std::vector<float> & t) {
+      std::vector<float> pooled(t);
+      for (int b = 0; b < nbin; ++b) {
+        for (int k = 1; k <= _door_trust.az_neighbours; ++k) {
+          pooled[b] = std::min({pooled[b], t[(b + k) % nbin], t[((b - k) % nbin + nbin) % nbin]});
+        }
+      }
+      t.swap(pooled);
+    };
+  if (_door_trust.az_neighbours > 0) {
+    pool(face);
+    pool(low_min);
+  }
+
+  // pass 2 (upper band): it stays only where the lower band has a return within depth of it in
+  // the same azimuth (a structure that reaches down into the marked band: a jamb, a leaf stile,
+  // a person), inside the zones (grown, so a face at the zone edge keeps its column) and within
+  // range_up. A lintel, a sign or anything else with nothing below it is not marked, and
+  // everywhere else the upper band goes, as the z band took it before. The kept points are also
+  // noted on a voxel-size grid for the lower pass.
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  size_t low_seen = 0, low_dropped = 0, up_marked = 0;
+  // kept upper returns on a dense cell grid around the lidar (everything the rule touches lies
+  // within range_up of it); a hash set here cost several ms per cloud
+  const double cell = _voxel_size > 0.0 ? _voxel_size : 0.02;
+  const int half = static_cast<int>(std::ceil((range_up + 2.0 * cell) / cell)) + 2, side = 2 * half + 1;
+  // per cell, a bit per voxel-size height step of the kept upper returns: a column the grid will
+  // mark needs mark_threshold voxels, so one stray return must not count as confirmation
+  std::vector<uint32_t> up_grid(static_cast<size_t>(side) * side, 0);
+  const auto grid_index = [&](const double x, const double y) {
+      const int ix = static_cast<int>(std::floor((x - ox) / cell)) + half;
+      const int iy = static_cast<int>(std::floor((y - oy) / cell)) + half;
+      return (ix < 0 || ix >= side || iy < 0 || iy >= side) ? -1 : ix * side + iy;
+    };
+  {
+    sensor_msgs::PointCloud2Iterator<float> x(cld, "x"), y(cld, "y"), z(cld, "z");
+    for (; x != x.end(); ++x, ++y, ++z) {
+      if (!std::isfinite(*x) || !std::isfinite(*y) || !std::isfinite(*z) || *z <= low_max || *z >= up_max) {
+        continue;
+      }
+      const double dx = *x - ox, dy = *y - oy, rh = std::sqrt(dx * dx + dy * dy);
+      const float below = rh < range_up ? low_min[bin_of(dx, dy)] : inf;
+      if (std::isfinite(below) && std::fabs(rh - below) <= _door_trust.depth && in_zone(*x, *y, grow)) {
+        ++up_marked;
+        const int gi = grid_index(*x, *y);
+        if (gi >= 0) {
+          const int step = std::min(31, std::max(0, static_cast<int>(std::floor((*z - low_max) / cell))));
+          up_grid[gi] |= (1u << step);
+        }
+      } else {
+        *x = nan;
+        *y = nan;
+        *z = nan;
+      }
+    }
+  }
+  // pass 3 (lower band): a point in a zone within range that sits margin..depth in front of its
+  // azimuth's face is not trusted, but only when that face will itself be marked (the support
+  // test above) and kept upper returns confirm the surface where the beam says it is: a cell with
+  // returns at three heights, within two cells of the point moved out along its beam to the face range. A flat jamb face has its
+  // upper returns right there; the thin front edge of a deep reveal, seen by a stray return or
+  // two, has them farther in, so those returns stay and the edge keeps its column (without this a
+  // jamb edge held by one lidar and one camera voxel lost its face when the lidar voxel went).
+  const auto upper_confirms = [&](const double fx, const double fy) {
+      const int gi = grid_index(fx, fy);
+      if (gi < 0) {
+        return false;
+      }
+      const int ix = gi / side, iy = gi % side;
+      for (int da = std::max(ix - 2, 0); da <= std::min(ix + 2, side - 1); ++da) {
+        for (int db = std::max(iy - 2, 0); db <= std::min(iy + 2, side - 1); ++db) {
+          // three heights, not two: the buffer's grid and the voxel grid's are not aligned
+          if (__builtin_popcount(up_grid[static_cast<size_t>(da) * side + db]) >= 3) {
+            return true;
+          }
+        }
+      }
+      return false;
+    };
+  sensor_msgs::PointCloud2Iterator<float> x(cld, "x"), y(cld, "y"), z(cld, "z");
+  for (; x != x.end(); ++x, ++y, ++z) {
+    if (!std::isfinite(*x) || !std::isfinite(*y) || !std::isfinite(*z)) {
+      continue;
+    }
+    const double h = *z;
+    if (h > low_max || h <= _min_obstacle_height) {
+      continue;   // upper band done above; below the band the z band decides, as it does today
+    }
+    const double dx = *x - ox, dy = *y - oy, rh = std::sqrt(dx * dx + dy * dy);
+    if (rh <= 0.05 || rh >= _door_trust.range || !in_zone(*x, *y, 0.0)) {
+      continue;
+    }
+    ++low_seen;
+    const int b = bin_of(dx, dy);
+    const float f = face[b], below = low_min[b];
+    if (!std::isfinite(f) || !std::isfinite(below) || std::fabs(f - below) > _door_trust.depth) {
+      continue;
+    }
+    const double gap = f - rh;
+    const double depth = h < _door_trust.low_cap_height ? _door_trust.low_cap_depth : _door_trust.depth;
+    if (gap > _door_trust.margin && gap < depth && upper_confirms(ox + dx * f / rh, oy + dy * f / rh)) {
+      *x = nan;
+      *y = nan;
+      *z = nan;
+      ++low_dropped;
+    }
+  }
+  if (!_dt_first_logged) {
+    _dt_first_logged = true;
+    RCLCPP_INFO(logger_, "%s: door trust applied to its first cloud (%zu lower points in the zones, %zu not trusted)",
+      _source_name.c_str(), low_seen, low_dropped);
+  }
+  ++_dt_applied;
+  _dt_low_seen += low_seen;
+  _dt_low_dropped += low_dropped;
+  _dt_up_marked += up_marked;
+  report();
+  return true;
 }
 
 /*****************************************************************************/

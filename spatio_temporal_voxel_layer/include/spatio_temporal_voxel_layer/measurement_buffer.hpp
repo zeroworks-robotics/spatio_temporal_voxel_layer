@@ -49,6 +49,7 @@
 #include "spatio_temporal_voxel_layer/measurement_reading.h"
 #include "spatio_temporal_voxel_layer/ground_columns.hpp"
 #include "spatio_temporal_voxel_layer/ground_reference.hpp"
+#include "spatio_temporal_voxel_layer/door_zones.hpp"
 // PCL
 #include "pcl/common/transforms.h"
 #include "pcl/filters/voxel_grid.h"
@@ -81,6 +82,32 @@ enum class Filters
 // conveniences for line lengths
 typedef std::list<observation::MeasurementReading>::iterator readings_iter;
 typedef std::unique_ptr<sensor_msgs::msg::PointCloud2> point_cloud_ptr;
+typedef std::shared_ptr<const std::vector<spatio_temporal_voxel_layer::Door>> door_list_ptr;
+
+// Door ray trust, a lidar marking source only (see MeasurementBuffer::DoorTrustFilter).
+// Heights are in height_filter_frame (base_link); ranges are horizontal, from the lidar.
+struct DoorTrustParams
+{
+  bool enabled{false};
+  double up_max{1.8};          // top of the upper band [max_obstacle_height, up_max) marked in door zones (m)
+  double range{1.3};           // the rule applies to lower points within this range (m)
+  double margin{0.01};         // a lower point this much nearer than the upper face is still trusted (m)
+  double depth{0.10};          // ... and one more than this much nearer is another object (m)
+  double az_bin_deg{1.0};      // azimuth bin of the face table (deg)
+  int az_neighbours{1};        // neighbour bins pooled into a face (jitter of the lidar's azimuths)
+  double low_cap_height{0.90}; // lower points below this height (m, the robot's body height plus 10 cm) ...
+  double low_cap_depth{0.03};  // ... use this depth instead
+};
+
+// Door zones of the map (DoorTrimLayer uses the same definition): |s| <= half_depth along the
+// travel direction through the node, |l| <= half_width across it.
+struct DoorZoneParams
+{
+  std::string map_frame{"map"};
+  double half_width{1.0};
+  double half_depth{0.8};
+  double max_tf_age{2.0};      // oldest map -> global transform the rule accepts (s)
+};
 
 // Measurement buffer
 class MeasurementBuffer
@@ -161,6 +188,15 @@ public:
   // missing neighbour is dropped when its surface is at least min_run pixels wide. px <= 0 = off.
   // See EdgeFilter.
   void SetEdgeFilter(const int & px, const int & min_run);
+  // Door ray trust: in the map's door zones, a lower-band point that reads 0..depth nearer than the
+  // upper band in the same azimuth is not marked, and the upper band is marked there. `doors` may be
+  // empty (the rule then never runs). See DoorTrustFilter.
+  void SetDoorTrust(const DoorTrustParams & params, const DoorZoneParams & zones, door_list_ptr doors);
+  bool DoorTrustEnabled(void) const {return _door_trust.enabled;}
+  // Switches a configured door trust rule off and on at run time (parameter door_trust).
+  void SetDoorTrustOn(const bool & on) {_door_trust_on = on;}
+  // the parameters as clamped by SetDoorTrust
+  const DoorTrustParams & DoorTrust(void) const {return _door_trust;}
 
   // State knoweldge if sensors are operating as expected
   bool UpdatedAtExpectedRate(void) const;
@@ -212,6 +248,21 @@ private:
   // points seen / dropped by the support filter since the last report
   size_t _support_seen{0}, _support_dropped{0};
   rclcpp::Time _support_report_time{0, 0, RCL_ROS_TIME};
+  // Door ray trust on the organized cloud in height_filter_frame. Returns true when the rule ran
+  // on this cloud (its upper band then stays in the cloud and the z band must reach up_max);
+  // false leaves the cloud untouched, which is today's behaviour.
+  bool DoorTrustFilter(
+    sensor_msgs::msg::PointCloud2 & cld, const geometry_msgs::msg::TransformStamped & cloud_to_filter,
+    const builtin_interfaces::msg::Time & stamp, const std::string & cloud_frame);
+  DoorTrustParams _door_trust;
+  bool _door_trust_on{true};
+  DoorZoneParams _door_zone;
+  door_list_ptr _doors;
+  // door trust counters since the last report: clouds seen / rule ran / skipped by reason
+  size_t _dt_clouds{0}, _dt_applied{0}, _dt_skip_tf{0}, _dt_skip_age{0}, _dt_skip_far{0};
+  size_t _dt_low_seen{0}, _dt_low_dropped{0}, _dt_up_marked{0};
+  rclcpp::Time _dt_report_time{0, 0, RCL_ROS_TIME};
+  bool _dt_first_logged{false};
   // Ground height at `range` from an ascending (range, z) profile.
   static float NearestGroundZ(
     const std::vector<std::pair<float, float>> & profile, const float & range);

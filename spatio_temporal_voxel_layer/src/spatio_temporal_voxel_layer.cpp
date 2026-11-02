@@ -323,6 +323,41 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
       getName().c_str(), hold_max, hold_grace);
   }
 
+  // door zones of the map for the sources' door trust rule (DoorTrimLayer reads the same nodes
+  // with the same zone shape; keep the two blocks equal). Empty map_file = no zones = rule off.
+  {
+    std::string map_file, err;
+    std::vector<std::string> types{"gate_private", "gate_public"};
+    int floor = -1;
+    declareParameter("door_zones.map_file", rclcpp::ParameterValue(std::string("")));
+    declareParameter("door_zones.map_frame", rclcpp::ParameterValue(_door_zone_params.map_frame));
+    declareParameter("door_zones.place_types", rclcpp::ParameterValue(types));
+    declareParameter("door_zones.floor", rclcpp::ParameterValue(-1));
+    declareParameter("door_zones.zone_half_width", rclcpp::ParameterValue(_door_zone_params.half_width));
+    declareParameter("door_zones.zone_half_depth", rclcpp::ParameterValue(_door_zone_params.half_depth));
+    declareParameter("door_zones.max_tf_age", rclcpp::ParameterValue(_door_zone_params.max_tf_age));
+    node->get_parameter(name_ + ".door_zones.map_file", map_file);
+    node->get_parameter(name_ + ".door_zones.map_frame", _door_zone_params.map_frame);
+    node->get_parameter(name_ + ".door_zones.place_types", types);
+    node->get_parameter(name_ + ".door_zones.floor", floor);
+    node->get_parameter(name_ + ".door_zones.zone_half_width", _door_zone_params.half_width);
+    node->get_parameter(name_ + ".door_zones.zone_half_depth", _door_zone_params.half_depth);
+    node->get_parameter(name_ + ".door_zones.max_tf_age", _door_zone_params.max_tf_age);
+    auto doors = std::make_shared<std::vector<Door>>();
+    if (!map_file.empty()) {
+      size_t skipped = 0;
+      if (!LoadDoorNodes(map_file, types, floor, *doors, err, &skipped)) {
+        RCLCPP_ERROR(logger_, "%s: door zones: %s", getName().c_str(), err.c_str());
+      } else {
+        RCLCPP_INFO(
+          logger_, "%s: %zu door zones from %s (floor %d), %.2f x %.2f m%s", getName().c_str(), doors->size(),
+          map_file.c_str(), floor, 2.0 * _door_zone_params.half_width, 2.0 * _door_zone_params.half_depth,
+          skipped > 0 ? (", " + std::to_string(skipped) + " door nodes without x/y skipped").c_str() : "");
+      }
+    }
+    _door_nodes = doors;
+  }
+
   matchSize();
 
   // One reference for the whole layer, so the buffers created below share it.
@@ -522,6 +557,26 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
     node->get_parameter(name_ + "." + source + "." + "support_filter_tol", support_tol);
     node->get_parameter(name_ + "." + source + "." + "support_filter_tol_per_m", support_tol_per_m);
     node->get_parameter(name_ + "." + source + "." + "support_filter_wrap_rows", support_wrap_rows);
+    // door ray trust, a lidar marking source only: see DoorTrustParams in measurement_buffer.hpp
+    buffer::DoorTrustParams door_trust;
+    declareParameter(source + "." + "door_trust", rclcpp::ParameterValue(false));
+    declareParameter(source + "." + "door_trust_up_max", rclcpp::ParameterValue(door_trust.up_max));
+    declareParameter(source + "." + "door_trust_range", rclcpp::ParameterValue(door_trust.range));
+    declareParameter(source + "." + "door_trust_margin", rclcpp::ParameterValue(door_trust.margin));
+    declareParameter(source + "." + "door_trust_depth", rclcpp::ParameterValue(door_trust.depth));
+    declareParameter(source + "." + "door_trust_az_bin_deg", rclcpp::ParameterValue(door_trust.az_bin_deg));
+    declareParameter(source + "." + "door_trust_az_neighbours", rclcpp::ParameterValue(door_trust.az_neighbours));
+    declareParameter(source + "." + "door_trust_low_cap_height", rclcpp::ParameterValue(door_trust.low_cap_height));
+    declareParameter(source + "." + "door_trust_low_cap_depth", rclcpp::ParameterValue(door_trust.low_cap_depth));
+    node->get_parameter(name_ + "." + source + "." + "door_trust", door_trust.enabled);
+    node->get_parameter(name_ + "." + source + "." + "door_trust_up_max", door_trust.up_max);
+    node->get_parameter(name_ + "." + source + "." + "door_trust_range", door_trust.range);
+    node->get_parameter(name_ + "." + source + "." + "door_trust_margin", door_trust.margin);
+    node->get_parameter(name_ + "." + source + "." + "door_trust_depth", door_trust.depth);
+    node->get_parameter(name_ + "." + source + "." + "door_trust_az_bin_deg", door_trust.az_bin_deg);
+    node->get_parameter(name_ + "." + source + "." + "door_trust_az_neighbours", door_trust.az_neighbours);
+    node->get_parameter(name_ + "." + source + "." + "door_trust_low_cap_height", door_trust.low_cap_height);
+    node->get_parameter(name_ + "." + source + "." + "door_trust_low_cap_depth", door_trust.low_cap_depth);
     ModelType model_type = static_cast<ModelType>(model_type_int);
 
     if (filter_str == "passthrough") {
@@ -609,7 +664,38 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
           RCLCPP_INFO(logger_, "%s: range bias, +min(%.4f / r, %.3f) m", source.c_str(), range_bias_k, range_bias_max);
         }
       }
+      if (door_trust.enabled) {
+        // the rule reads heights in the robot's base frame and ranges from the sensor, keeps points
+        // above max_obstacle_height for the z band to take, and needs a filter to drop its NaNs
+        const char * why = nullptr;
+        if (!_door_nodes || _door_nodes->empty()) {
+          why = "has no door zones (door_zones.map_file)";
+        } else if (height_filter_frame.empty() || height_filter_frame == _global_frame) {
+          why = "needs height_filter_frame set to the robot's base frame";
+        } else if (!sensor_frame.empty()) {
+          why = "needs the cloud in the sensor frame, but sensor_frame is set";
+        } else if (filter == buffer::Filters::NONE) {
+          why = "needs a filter";
+        } else if (ground_relative_height) {
+          why = "cannot run with ground_relative_height";
+        } else if (door_trust.up_max <= max_obstacle_height) {
+          why = "needs door_trust_up_max above max_obstacle_height";
+        }
+        if (why != nullptr) {
+          RCLCPP_WARN(logger_, "%s: door_trust %s; off", source.c_str(), why);
+        } else {
+          _observation_buffers.back()->SetDoorTrust(door_trust, _door_zone_params, _door_nodes);
+          const buffer::DoorTrustParams & dt = _observation_buffers.back()->DoorTrust();
+          RCLCPP_INFO(
+            logger_, "%s: door trust in %zu door zones: within %.2f m, a point below %.2f m that reads "
+            "%.3f..%.3f m nearer than the %.2f..%.2f m band in its %.1f deg azimuth (+-%d bins) is not marked",
+            source.c_str(), _door_nodes->size(), dt.range, max_obstacle_height, dt.margin, dt.depth,
+            max_obstacle_height, dt.up_max, dt.az_bin_deg, dt.az_neighbours);
+        }
+      }
       _marking_buffers.push_back(_observation_buffers.back());
+    } else if (door_trust.enabled) {
+      RCLCPP_WARN(logger_, "%s: door_trust needs a marking source; ignored", source.c_str());
     }
 
     // Add buffer to clearing observation buffers
@@ -1260,8 +1346,10 @@ SpatioTemporalVoxelLayer::dynamicParametersCallback(std::vector<rclcpp::Paramete
     const auto & type = parameter.get_type();
     const auto & name = parameter.get_name();
 
-    // the decay hold is handed to the grid at configure time only
-    if (name == name_ + ".decay_hold_grace" || name == name_ + ".decay_hold_max") {
+    // the decay hold is handed to the grid, and the door zones to the buffers, at configure time only
+    if (name == name_ + ".decay_hold_grace" || name == name_ + ".decay_hold_max" ||
+      name.rfind(name_ + ".door_zones.", 0) == 0)
+    {
       result.successful = false;
       result.reason = name + " can only be set at configure time";
       return result;
@@ -1274,7 +1362,27 @@ SpatioTemporalVoxelLayer::dynamicParametersCallback(std::vector<rclcpp::Paramete
       // on the buffers at configure time only; refuse rather than accept and ignore.
       static const std::vector<std::string> configure_only{"voxel_decay", "voxel_decay_range", "range_bias_k",
         "range_bias_max", "edge_filter_px", "edge_filter_min_run", "support_filter_min", "support_filter_tol",
-        "support_filter_tol_per_m", "support_filter_wrap_rows"};
+        "support_filter_tol_per_m", "support_filter_wrap_rows", "door_trust_up_max",
+        "door_trust_range", "door_trust_margin", "door_trust_depth", "door_trust_az_bin_deg",
+        "door_trust_az_neighbours", "door_trust_low_cap_height", "door_trust_low_cap_depth"};
+      // door_trust switches a rule loaded at configure time off and on (field A/B without a restart)
+      if (name == name_ + "." + source + ".door_trust" && type == ParameterType::PARAMETER_BOOL) {
+        for (auto & buffer : _observation_buffers) {
+          if (buffer->GetSourceName() != source) {
+            continue;
+          }
+          if (!buffer->DoorTrustEnabled()) {
+            result.successful = false;
+            result.reason = name + ": door trust was not loaded at configure time (door_trust false or rejected)";
+            return result;
+          }
+          buffer->Lock();
+          buffer->SetDoorTrustOn(parameter.as_bool());
+          buffer->Unlock();
+          RCLCPP_INFO(logger_, "%s: door trust %s", source.c_str(), parameter.as_bool() ? "on" : "off");
+        }
+        continue;
+      }
       if (std::any_of(configure_only.begin(), configure_only.end(),
         [&](const std::string & key) {return name == name_ + "." + source + "." + key;}))
       {
@@ -1294,6 +1402,13 @@ SpatioTemporalVoxelLayer::dynamicParametersCallback(std::vector<rclcpp::Paramete
         } else if (name == name_ + "." + source + "." + "max_obstacle_height") {
           for (auto & buffer : _observation_buffers) {
             if (buffer->GetSourceName() == source) {
+              if (buffer->DoorTrustEnabled()) {
+                // the door trust rule's lower band ends at this height; it was checked against
+                // door_trust_up_max at configure time
+                result.successful = false;
+                result.reason = name + " is fixed while door_trust is on";
+                return result;
+              }
               buffer->Lock();
               buffer->SetMaxObstacleHeight(parameter.as_double());
               buffer->Unlock();

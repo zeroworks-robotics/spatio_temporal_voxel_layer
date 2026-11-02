@@ -33,6 +33,28 @@
 #     2.5 m once the rear end is about 1.75 m beyond the door. The count is over all sources, so camera
 #     voxels 2.5 m and more from the lidar (cameras mark to 3.0 m from their own mounts) need one voxel too.
 #     A door farther than 2.5 m ahead is drawn at threshold 1 until the robot is within 2.5 m of it.
+#   * lidar_mark.door_trust (needs door_zones.map_file): in the map's door zones (|s| <= 0.8, |l| <= 1.0 around
+#     a gate node, as door_trim), the Airy reads a jamb it meets head-on within 1.3 m 2-8 cm short in the band
+#     the costmap marks (0.08-1.5 m), while the rings above (1.5-1.8 m) read it where it is. A jamb is the same
+#     width at every height, so a lower return that is 1..10 cm nearer than the 1.5-1.8 m face in its 1 deg
+#     azimuth (+-1 bin) is not marked, and the 1.5-1.8 m band is marked inside the zones within 1.4 m, but only
+#     where the lower band has a return within 10 cm of it in that azimuth (a jamb, a leaf stile, a person), so a
+#     lintel or a sign with nothing below it is never marked. A lower return goes only when such a kept upper
+#     returns at three heights lie within 2 cells (4-6 cm) of where its beam meets the face, so the costmap keeps a column right
+#     where anything was let go (a jamb in the lidar's thin frontal sector, held by one camera voxel and one lidar voxel,
+#     lost its face otherwise). No point is moved; nothing taller behind a return (a child, a box, a person in
+#     the opening) leaves it as it is.
+#     Replay of the 2026-10-23 doors (24 passages, 779 samples), costmap width against tape before / inside /
+#     after: -6.9 / -9.3 / -5.6 % -> -5.8 / -5.8 / -5.2 %; closed-door moments 190 / 192 (191 before, the lost
+#     one sits at the edge of the +-15 cm test row); far1 unchanged. Orin: 1.16 -> 1.21 cores, cycle mean +1.5 ms
+#     with the rule on every cloud. Residual: a low protrusion 1..10 cm (plus the 4-6 cm confirmation window) in
+#     front of a full-height face (a panic bar) is drawn at that face; cameras (0.12-1.2 m) still mark it.
+#     Rule off (today's cloud) when the map pose is missing or older than door_zones.max_tf_age, no door is
+#     within reach, or the cloud is not in the sensor frame; `ros2 param set /costmap/costmap
+#     stvl_layer.lidar_mark.door_trust false|true` switches it off and on while running. Every 30 s lidar_mark logs how often it ran and
+#     what it dropped. Points beyond obstacle_range are now cut before the VoxelGrid (voxel filter, no sensor_frame): PCL
+#     returns the cloud unfiltered (NaN, floor, ceiling) when its index box passes INT32 voxels, which a 2 cm
+#     leaf reached on wide views ("Leaf size is too small", 63 times in the far1 replay before this).
 # Pre-gate numbers below (measured before mark_threshold_far): replay of the 2026-10-23 recording (large
 # clouds over shared memory, as on the robot), door width against
 # tape (median of 12 doors), before / inside / after the door: the robot's own live costmap that day
@@ -87,6 +109,14 @@ costmap:
         mark_threshold_far: 1              # beyond the range below (header note)
         mark_threshold_far_range: 2.5      # m from the centre below
         mark_threshold_far_centre_x: 0.2266  # base_link x of the lidar mount
+        door_zones:                 # for lidar_mark.door_trust below; keep equal to door_trim's
+          map_file: ''              # the site's map.json, as door_trim.map_file; empty = door_trust off
+          map_frame: map
+          place_types: [gate_private, gate_public]
+          floor: 1
+          zone_half_width: 1.0
+          zone_half_depth: 0.8
+          max_tf_age: 2.0
         update_footprint_enabled: true
         combination_method: 0
         origin_z: 0.0
@@ -285,6 +315,15 @@ costmap:
           clear_after_reading: true
           support_filter_min: 1
           support_filter_wrap_rows: true
+          door_trust: true                 # header note; needs door_zones.map_file above
+          door_trust_up_max: 1.8
+          door_trust_range: 1.3
+          door_trust_margin: 0.01
+          door_trust_depth: 0.10
+          door_trust_az_bin_deg: 1.0
+          door_trust_az_neighbours: 1
+          door_trust_low_cap_height: 0.90
+          door_trust_low_cap_depth: 0.03
         lidar_clear:
           data_type: PointCloud2
           topic: /rslidar_points_deskewed
