@@ -469,6 +469,28 @@ void MeasurementBuffer::BufferROSCloud(
       }
     }
 
+    // Points beyond obstacle_range never mark (the grid drops them), but they still stretch the
+    // VoxelGrid's index box: on a box of more than INT32 voxels PCL warns ("Leaf size is too
+    // small") and returns the cloud UNFILTERED, NaN and every height included, and the grid then
+    // marks floor and ceiling. A lidar looking out of a door at a yard reaches that with a 2 cm
+    // leaf. Cap the range before the filter; 2 x 14 m across stays far below the limit.
+    // (the grid measures range from sensor_frame when one is set; the cut is skipped then)
+    if (_filter == Filters::VOXEL && _obstacle_range > 0.0 && _sensor_frame.empty()) {
+      const double ox = tf_stamped.transform.translation.x, oy = tf_stamped.transform.translation.y,
+        oz = tf_stamped.transform.translation.z, r2 = _obstacle_range * _obstacle_range;
+      const float nan = std::numeric_limits<float>::quiet_NaN();
+      sensor_msgs::PointCloud2Iterator<float> cx(*cld_global, "x"), cy(*cld_global, "y"), cz(*cld_global, "z");
+      for (; cx != cx.end(); ++cx, ++cy, ++cz) {
+        const double dx = *cx - ox, dy = *cy - oy, dz = *cz - oz;
+        if (std::isfinite(dx) && std::isfinite(dy) && std::isfinite(dz) && dx * dx + dy * dy + dz * dz > r2) {
+          *cx = nan;
+          *cy = nan;
+          *cz = nan;
+        }
+      }
+      cld_global->is_dense = false;
+    }
+
     pcl::PCLPointCloud2::Ptr cloud_pcl(new pcl::PCLPointCloud2());
     pcl::PCLPointCloud2::Ptr cloud_filtered(new pcl::PCLPointCloud2());
 
