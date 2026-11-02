@@ -336,6 +336,15 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
     declareParameter("door_zones.zone_half_width", rclcpp::ParameterValue(_door_zone_params.half_width));
     declareParameter("door_zones.zone_half_depth", rclcpp::ParameterValue(_door_zone_params.half_depth));
     declareParameter("door_zones.max_tf_age", rclcpp::ParameterValue(_door_zone_params.max_tf_age));
+    // the rule runs at a door only while the robot is between the standby nodes before and after it
+    // ("" = whenever the lidar sees the zone)
+    std::string trigger_type = "gate_standby";
+    declareParameter("door_zones.trigger_type", rclcpp::ParameterValue(trigger_type));
+    declareParameter("door_zones.trigger_margin", rclcpp::ParameterValue(_door_zone_params.trigger_margin));
+    // the rule stays on at least this far past the door node on either side, also where a standby
+    // node is nearer (doors in a row keep it on between them: their windows overlap)
+    double trigger_min_reach = 2.0;
+    declareParameter("door_zones.trigger_min_reach", rclcpp::ParameterValue(trigger_min_reach));
     node->get_parameter(name_ + ".door_zones.map_file", map_file);
     node->get_parameter(name_ + ".door_zones.map_frame", _door_zone_params.map_frame);
     node->get_parameter(name_ + ".door_zones.place_types", types);
@@ -343,6 +352,9 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
     node->get_parameter(name_ + ".door_zones.zone_half_width", _door_zone_params.half_width);
     node->get_parameter(name_ + ".door_zones.zone_half_depth", _door_zone_params.half_depth);
     node->get_parameter(name_ + ".door_zones.max_tf_age", _door_zone_params.max_tf_age);
+    node->get_parameter(name_ + ".door_zones.trigger_type", trigger_type);
+    node->get_parameter(name_ + ".door_zones.trigger_margin", _door_zone_params.trigger_margin);
+    node->get_parameter(name_ + ".door_zones.trigger_min_reach", trigger_min_reach);
     auto doors = std::make_shared<std::vector<Door>>();
     if (!map_file.empty()) {
       size_t skipped = 0;
@@ -353,6 +365,25 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
           logger_, "%s: %zu door zones from %s (floor %d), %.2f x %.2f m%s", getName().c_str(), doors->size(),
           map_file.c_str(), floor, 2.0 * _door_zone_params.half_width, 2.0 * _door_zone_params.half_depth,
           skipped > 0 ? (", " + std::to_string(skipped) + " door nodes without x/y skipped").c_str() : "");
+        if (!trigger_type.empty()) {
+          // standby nodes sit on the door's axis 1.5-3 m before and after it in the cona maps
+          const int paired = PairStandbyNodes(map_file, trigger_type, 8.0, 0.30, *doors, err);
+          for (auto & d : *doors) {
+            if (d.triggered) {
+              d.trig_lo = std::min(d.trig_lo, -trigger_min_reach);
+              d.trig_hi = std::max(d.trig_hi, trigger_min_reach);
+            }
+          }
+          if (paired < 0) {
+            RCLCPP_ERROR(logger_, "%s: door zones trigger: %s; door trust never runs", getName().c_str(), err.c_str());
+          } else {
+            RCLCPP_INFO(
+              logger_, "%s: %d of %zu doors have %s nodes before and after them; door trust runs only while the "
+              "robot is between them or within %.1f m of the door (+-%.2f m), never at the other doors", getName().c_str(),
+              paired, doors->size(), trigger_type.c_str(), trigger_min_reach, _door_zone_params.trigger_margin);
+          }
+          _door_zone_params.trigger = true;
+        }
       }
     }
     _door_nodes = doors;

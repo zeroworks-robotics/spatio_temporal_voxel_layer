@@ -107,6 +107,10 @@ struct DoorZoneParams
   double half_width{1.0};
   double half_depth{0.8};
   double max_tf_age{2.0};      // oldest map -> global transform the rule accepts (s)
+  // the rule runs at a door only while the robot is between its standby nodes (Door::trig_*),
+  // widened by trigger_margin; false = whenever the lidar sees the zone
+  bool trigger{false};
+  double trigger_margin{0.10};
 };
 
 // Measurement buffer
@@ -259,7 +263,7 @@ private:
   DoorZoneParams _door_zone;
   door_list_ptr _doors;
   // door trust counters since the last report: clouds seen / rule ran / skipped by reason
-  size_t _dt_clouds{0}, _dt_applied{0}, _dt_skip_tf{0}, _dt_skip_age{0}, _dt_skip_far{0};
+  size_t _dt_clouds{0}, _dt_applied{0}, _dt_skip_tf{0}, _dt_skip_age{0}, _dt_skip_far{0}, _dt_skip_trigger{0};
   size_t _dt_low_seen{0}, _dt_low_dropped{0}, _dt_up_marked{0};
   rclcpp::Time _dt_report_time{0, 0, RCL_ROS_TIME};
   bool _dt_first_logged{false};

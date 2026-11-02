@@ -841,11 +841,11 @@ bool MeasurementBuffer::DoorTrustFilter(
       } else if ((now - _dt_report_time).seconds() > 30.0) {
         RCLCPP_INFO(
           logger_, "%s: door trust ran on %zu of %zu clouds in the last 30 s (skipped: no map pose %zu, "
-          "map pose too old %zu, no door near %zu); lower points in the zones %zu, not trusted %.1f%%, "
+          "map pose too old %zu, no door near %zu, robot not between standby nodes %zu); lower points in the zones %zu, not trusted %.1f%%, "
           "upper points marked %zu", _source_name.c_str(), _dt_applied, _dt_clouds, _dt_skip_tf,
-          _dt_skip_age, _dt_skip_far, _dt_low_seen,
+          _dt_skip_age, _dt_skip_far, _dt_skip_trigger, _dt_low_seen,
           100.0 * _dt_low_dropped / std::max<size_t>(_dt_low_seen, 1), _dt_up_marked);
-        _dt_clouds = _dt_applied = _dt_skip_tf = _dt_skip_age = _dt_skip_far = 0;
+        _dt_clouds = _dt_applied = _dt_skip_tf = _dt_skip_age = _dt_skip_far = _dt_skip_trigger = 0;
         _dt_low_seen = _dt_low_dropped = _dt_up_marked = 0;
         _dt_report_time = now;
       }
@@ -901,6 +901,7 @@ bool MeasurementBuffer::DoorTrustFilter(
     range_up * std::tan((_door_trust.az_neighbours + 1) * _door_trust.az_bin_deg * M_PI / 180.0);
   const double reach = std::hypot(hw + grow, hd + grow) + range_up;
   std::vector<Zone> zones;
+  bool near_door = false;
   for (const auto & d : *_doors) {
     const tf2::Vector3 p = map_to_filter * tf2::Vector3(d.x, d.y, 0.0);
     if (std::hypot(p.x() - ox, p.y() - oy) > reach) {
@@ -911,10 +912,21 @@ bool MeasurementBuffer::DoorTrustFilter(
     if (len < 1e-6) {
       continue;
     }
-    zones.push_back({p.x(), p.y(), u.x() / len, u.y() / len});
+    const double ux = u.x() / len, uy = u.y() / len;
+    near_door = true;
+    if (_door_zone.trigger) {
+      // the robot (the filter frame's origin) must be on its way through this door: between the
+      // standby nodes before and after it, as the robot's own gate procedure is
+      const double s_robot = -p.x() * ux - p.y() * uy, l_robot = p.x() * uy - p.y() * ux;
+      const double m = _door_zone.trigger_margin;
+      if (!d.triggered || s_robot < d.trig_lo - m || s_robot > d.trig_hi + m || std::fabs(l_robot) > hw) {
+        continue;
+      }
+    }
+    zones.push_back({p.x(), p.y(), ux, uy});
   }
   if (zones.empty()) {
-    ++_dt_skip_far;
+    ++(near_door ? _dt_skip_trigger : _dt_skip_far);
     report();
     return false;
   }

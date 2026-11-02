@@ -49,6 +49,9 @@
 #     one sits at the edge of the +-15 cm test row); far1 unchanged. Orin: 1.16 -> 1.21 cores, cycle mean +1.5 ms
 #     with the rule on every cloud. Residual: a low protrusion 1..10 cm (plus the 4-6 cm confirmation window) in
 #     front of a full-height face (a panic bar) is drawn at that face; cameras (0.12-1.2 m) still mark it.
+#     It runs at a door only while the robot's centre, projected on the door's axis, is between the standby
+#     nodes (gate_standby) before and after it (1.5-3 m out) or within 2 m of the door node, whichever reaches
+#     farther; doors in a row (mall B, 3.7 m apart) keep it on between them. Map nodes and the localizer only.
 #     Rule off (today's cloud) when the map pose is missing or older than door_zones.max_tf_age, no door is
 #     within reach, or the cloud is not in the sensor frame; `ros2 param set /costmap/costmap
 #     stvl_layer.lidar_mark.door_trust false|true` switches it off and on while running. Every 30 s lidar_mark logs how often it ran and
@@ -117,6 +120,9 @@ costmap:
           zone_half_width: 1.0
           zone_half_depth: 0.8
           max_tf_age: 2.0
+          trigger_type: gate_standby   # door trust only while the robot is between a door's standby nodes; '' = always
+          trigger_margin: 0.10
+          trigger_min_reach: 2.0       # ... and at least 2 m past the door node either way
         update_footprint_enabled: true
         combination_method: 0
         origin_z: 0.0

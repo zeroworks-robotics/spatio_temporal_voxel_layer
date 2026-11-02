@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -91,6 +92,62 @@ bool LoadDoorNodes(
     out.push_back({x, y, ux / len, uy / len});
   }
   return true;
+}
+
+/*****************************************************************************/
+int PairStandbyNodes(
+  const std::string & file, const std::string & type, double max_dist, double max_lateral,
+  std::vector<Door> & doors, std::string & err)
+/*****************************************************************************/
+{
+  std::ifstream in(file);
+  if (!in) {
+    err = "cannot open " + file;
+    return -1;
+  }
+  nlohmann::json map;
+  try {
+    in >> map;
+  } catch (const nlohmann::json::exception & e) {
+    err = file + " does not parse: " + e.what();
+    return -1;
+  }
+  if (!map.is_object() || !map.contains("nodes") || !map["nodes"].is_array()) {
+    err = file + " has no nodes array";
+    return -1;
+  }
+  std::vector<std::pair<double, double>> standby;
+  for (const auto & n : map["nodes"]) {
+    if (n.is_object() && n.contains("Place") && n["Place"].is_object() && n["Place"].contains("type") &&
+      n["Place"]["type"].is_string() && n["Place"]["type"].get<std::string>() == type &&
+      n.contains("x") && n["x"].is_number() && n.contains("y") && n["y"].is_number())
+    {
+      standby.emplace_back(n["x"].get<double>(), n["y"].get<double>());
+    }
+  }
+  int paired = 0;
+  for (auto & d : doors) {
+    double lo = -std::numeric_limits<double>::infinity(), hi = std::numeric_limits<double>::infinity();
+    for (const auto & p : standby) {
+      const double dx = p.first - d.x, dy = p.second - d.y;
+      const double s = dx * d.ux + dy * d.uy, l = -dx * d.uy + dy * d.ux;
+      if (std::hypot(dx, dy) > max_dist || std::fabs(l) > max_lateral) {
+        continue;
+      }
+      if (s < 0.0 && s > lo) {
+        lo = s;
+      } else if (s > 0.0 && s < hi) {
+        hi = s;
+      }
+    }
+    d.triggered = std::isfinite(lo) && std::isfinite(hi);
+    if (d.triggered) {
+      d.trig_lo = lo;
+      d.trig_hi = hi;
+      ++paired;
+    }
+  }
+  return paired;
 }
 
 }  // namespace spatio_temporal_voxel_layer
