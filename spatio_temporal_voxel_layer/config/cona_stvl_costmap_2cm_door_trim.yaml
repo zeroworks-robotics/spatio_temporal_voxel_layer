@@ -33,7 +33,7 @@
 #     2.5 m once the rear end is about 1.75 m beyond the door. The count is over all sources, so camera
 #     voxels 2.5 m and more from the lidar (cameras mark to 3.0 m from their own mounts) need one voxel too.
 #     A door farther than 2.5 m ahead is drawn at threshold 1 until the robot is within 2.5 m of it.
-#   * lidar_mark.door_trust (needs door_zones.map_file): in the map's door zones (|s| <= 0.8, |l| <= 1.0 around
+#   * lidar_mark.door_trust (needs door_zones: the planner's door passage topic, or map_file): in the door zones (|s| <= 0.8, |l| <= 1.0 around
 #     a gate node, as door_trim), the Airy reads a jamb it meets head-on within 1.3 m 2-8 cm short in the band
 #     the costmap marks (0.08-1.5 m), while the rings above (1.5-1.8 m) read it where it is. A jamb is the same
 #     width at every height, so a lower return that is 1..10 cm nearer than the 1.5-1.8 m face in its 1 deg
@@ -324,7 +324,7 @@ costmap:
           clear_after_reading: true
           support_filter_min: 1
           support_filter_wrap_rows: true
-          door_trust: true                 # header note; needs door_zones.map_file above
+          door_trust: true                 # header note; needs door_zones above (planner topic or map_file)
           door_trust_up_max: 1.8
           door_trust_range: 1.3
           door_trust_margin: 0.01

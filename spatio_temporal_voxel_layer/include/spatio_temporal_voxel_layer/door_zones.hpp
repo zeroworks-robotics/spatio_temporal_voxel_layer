@@ -65,7 +65,8 @@ public:
   List Get(double now, double max_age) const
   {
     std::lock_guard<std::mutex> lk(m_);
-    if (!doors_ || (stamp_ >= 0.0 && now - stamp_ > max_age)) {
+    // a clock that went back (a replay rewound, a time sync) also makes the list stale
+    if (!doors_ || (stamp_ >= 0.0 && (now < stamp_ || now - stamp_ > max_age))) {
       return nullptr;
     }
     return doors_;

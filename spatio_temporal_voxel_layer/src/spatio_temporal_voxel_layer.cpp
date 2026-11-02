@@ -46,6 +46,7 @@
 #include <vector>
 
 #include "spatio_temporal_voxel_layer/spatio_temporal_voxel_layer.hpp"
+#include "tf2/utils.h"
 
 namespace spatio_temporal_voxel_layer
 {
@@ -365,7 +366,14 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
     node->get_parameter(name_ + ".door_zones.trigger_margin", _door_zone_params.trigger_margin);
     node->get_parameter(name_ + ".door_zones.trigger_min_reach", trigger_min_reach);
     auto doors = std::make_shared<std::vector<Door>>();
-    if (source == "planner") {
+    const bool feed_ok = std::isfinite(_door_zone_params.feed_max_age) && _door_zone_params.feed_max_age > 0.0;
+    if (source != "map" && source != "planner") {
+      RCLCPP_ERROR(logger_, "%s: door_zones.source '%s' is neither map nor planner; door trust off",
+        getName().c_str(), source.c_str());
+    } else if (source == "planner" && (planner_topic.empty() || !feed_ok)) {
+      RCLCPP_ERROR(logger_, "%s: door_zones.source planner needs planner_topic and feed_max_age > 0; door trust off",
+        getName().c_str());
+    } else if (source == "planner") {
       // the planner decides when a door counts (from the standby before it to 2 m past it on its
       // path), so no map trigger here; the zone shape around each announced door is the same
       _door_zone_params.trigger = false;
@@ -373,6 +381,8 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
       auto clock = node->get_clock();
       const std::string map_frame = _door_zone_params.map_frame;
       auto logger = logger_;
+      rclcpp::SubscriptionOptions feed_opt;
+      feed_opt.callback_group = callback_group_;
       _door_passage_sub = node->create_subscription<geometry_msgs::msg::PoseArray>(
         planner_topic, rclcpp::QoS(rclcpp::KeepLast(1)),
         [feed, clock, map_frame, logger](geometry_msgs::msg::PoseArray::ConstSharedPtr msg) {
@@ -387,12 +397,15 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
           }
           auto list = std::make_shared<std::vector<Door>>();
           for (const auto & p : msg->poses) {
-            const double yaw = 2.0 * std::atan2(p.orientation.z, p.orientation.w);
+            const double yaw = tf2::getYaw(p.orientation);
+            if (!std::isfinite(p.position.x) || !std::isfinite(p.position.y) || !std::isfinite(yaw)) {
+              continue;
+            }
             list->push_back({p.position.x, p.position.y, std::cos(yaw), std::sin(yaw)});
           }
           // stamped on arrival: the planner's clock need not match this node's
           f->Set(list, clock->now().seconds());
-        });
+        }, feed_opt);
       RCLCPP_INFO(
         logger_, "%s: door zones from the planner on %s (none after %.2f s of silence), %.2f x %.2f m",
         getName().c_str(), planner_topic.c_str(), _door_zone_params.feed_max_age,
@@ -427,7 +440,7 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
         }
       }
     }
-    if (source != "planner") {
+    if (source == "map" && !doors->empty()) {
       _door_feed->Set(doors, -1.0);
     }
   }
