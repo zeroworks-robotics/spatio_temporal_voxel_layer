@@ -4,12 +4,10 @@
 
 #include <algorithm>
 #include <cmath>
-#include <fstream>
 #include <string>
 #include <vector>
 
 #include "nav2_costmap_2d/cost_values.hpp"
-#include "nlohmann/json.hpp"
 #include "pluginlib/class_list_macros.hpp"
 #include "tf2/exceptions.h"
 #include "tf2/utils.h"
@@ -70,69 +68,18 @@ bool DoorTrimLayer::LoadDoors(
   const std::string & file, const std::vector<std::string> & types, int floor)
 /*****************************************************************************/
 {
-  std::ifstream in(file);
-  if (!in) {
+  // the loader is shared with the voxel layer's door trust rule (door_zones.hpp)
+  if (file.empty()) {
+    return false;   // the caller reports the empty map_file
+  }
+  std::string err;
+  size_t skipped = 0;
+  if (!LoadDoorNodes(file, types, floor, _doors, err, &skipped)) {
+    RCLCPP_ERROR(logger_, "%s: %s", name_.c_str(), err.c_str());
     return false;
   }
-  nlohmann::json map;
-  try {
-    in >> map;
-  } catch (const nlohmann::json::exception & e) {
-    RCLCPP_ERROR(logger_, "%s: %s does not parse: %s", name_.c_str(), file.c_str(), e.what());
-    return false;
-  }
-  if (!map.is_object() || !map.contains("nodes") || !map["nodes"].is_array()) {
-    RCLCPP_ERROR(logger_, "%s: %s has no nodes array", name_.c_str(), file.c_str());
-    return false;
-  }
-  const auto & nodes = map["nodes"];
-  auto number = [](const nlohmann::json & o, const char * key, double & out) {
-      if (!o.is_object() || !o.contains(key) || !o[key].is_number()) {
-        return false;
-      }
-      out = o[key].get<double>();
-      return true;
-    };
-  for (size_t idx = 0; idx < nodes.size(); ++idx) {
-    const auto & n = nodes[idx];
-    if (!n.is_object() || !n.contains("Place") || !n["Place"].is_object() ||
-      !n["Place"].contains("type") || !n["Place"]["type"].is_string())
-    {
-      continue;
-    }
-    const std::string type = n["Place"]["type"].get<std::string>();
-    if (std::find(types.begin(), types.end(), type) == types.end()) {
-      continue;
-    }
-    double node_floor = -1.0, x, y, th = 0.0;
-    number(n, "floor", node_floor);
-    if (floor >= 0 && static_cast<int>(node_floor) != floor) {
-      continue;
-    }
-    if (!number(n, "x", x) || !number(n, "y", y)) {
-      RCLCPP_WARN(logger_, "%s: door node %zu has no x/y, skipped", name_.c_str(), idx);
-      continue;
-    }
-    // direction of travel: from the first to the second neighbour, else the node heading
-    number(n, "th", th);
-    double ux = std::cos(th * M_PI / 180.0), uy = std::sin(th * M_PI / 180.0);
-    if (n.contains("edge_to") && n["edge_to"].is_array() && n["edge_to"].size() >= 2 &&
-      n["edge_to"][0].is_number_unsigned() && n["edge_to"][1].is_number_unsigned())
-    {
-      const size_t ia = n["edge_to"][0].get<size_t>(), ib = n["edge_to"][1].get<size_t>();
-      double ax, ay, bx, by;
-      if (ia < nodes.size() && ib < nodes.size() && number(nodes[ia], "x", ax) && number(nodes[ia], "y", ay) &&
-        number(nodes[ib], "x", bx) && number(nodes[ib], "y", by))
-      {
-        ux = bx - ax;
-        uy = by - ay;
-      }
-    }
-    const double len = std::hypot(ux, uy);
-    if (len < 1e-6) {
-      continue;
-    }
-    _doors.push_back({x, y, ux / len, uy / len});
+  if (skipped > 0) {
+    RCLCPP_WARN(logger_, "%s: %zu door nodes without x/y skipped", name_.c_str(), skipped);
   }
   return !_doors.empty();
 }

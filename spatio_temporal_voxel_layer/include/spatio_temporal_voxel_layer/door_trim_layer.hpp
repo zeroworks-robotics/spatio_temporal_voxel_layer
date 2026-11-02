@@ -8,6 +8,7 @@
 
 #include "nav2_costmap_2d/costmap_2d.hpp"
 #include "nav2_costmap_2d/layer.hpp"
+#include "spatio_temporal_voxel_layer/door_zones.hpp"
 
 namespace spatio_temporal_voxel_layer
 {
@@ -41,12 +42,7 @@ public:
   bool isClearable() override {return false;}
 
 private:
-  // a door node: position and the unit direction of travel through it, in the map frame
-  struct Door
-  {
-    double x, y, ux, uy;
-  };
-
+  // door nodes of the map named by map_file (Door: door_zones.hpp, shared with the voxel layer)
   bool LoadDoors(const std::string & file, const std::vector<std::string> & types, int floor);
   void TrimDoor(
     nav2_costmap_2d::Costmap2D & grid, double px, double py, double ux, double uy,

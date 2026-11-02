@@ -112,6 +112,7 @@ add_library(${library_name} SHARED
             src/spatio_temporal_voxel_grid.cpp
             src/measurement_buffer.cpp
             src/door_trim_layer.cpp
+            src/door_zones.cpp
             src/frustum_models/depth_camera_frustum.cpp
             src/frustum_models/three_dimensional_lidar_frustum.cpp
             src/vdb2pc.cpp
