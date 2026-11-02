@@ -113,6 +113,9 @@ costmap:
         mark_threshold_far_range: 2.5      # m from the centre below
         mark_threshold_far_centre_x: 0.2266  # base_link x of the lidar mount
         door_zones:                 # for lidar_mark.door_trust below; keep equal to door_trim's
+          source: planner           # planner: doors the planner announces on planner_topic; map: map_file + trigger
+          planner_topic: /cona/planner/door_passage
+          feed_max_age: 0.5         # planner silent this long (s) = no door, today's costmap
           map_file: ''              # the site's map.json, as door_trim.map_file; empty = door_trust off
           map_frame: map
           place_types: [gate_private, gate_public]

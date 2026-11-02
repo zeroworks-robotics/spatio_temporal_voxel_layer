@@ -794,7 +794,7 @@ void MeasurementBuffer::SetRangeBias(const double & k, const double & max)
 
 /*****************************************************************************/
 void MeasurementBuffer::SetDoorTrust(
-  const DoorTrustParams & params, const DoorZoneParams & zones, door_list_ptr doors)
+  const DoorTrustParams & params, const DoorZoneParams & zones, door_feed_ptr doors)
 /*****************************************************************************/
 {
   _door_trust = params;
@@ -841,17 +841,19 @@ bool MeasurementBuffer::DoorTrustFilter(
       } else if ((now - _dt_report_time).seconds() > 30.0) {
         RCLCPP_INFO(
           logger_, "%s: door trust ran on %zu of %zu clouds in the last 30 s (skipped: no map pose %zu, "
-          "map pose too old %zu, no door near %zu, robot not between standby nodes %zu); lower points in the zones %zu, not trusted %.1f%%, "
+          "map pose too old %zu, no door near %zu, robot not between standby nodes %zu, no door from the feed %zu); lower points in the zones %zu, not trusted %.1f%%, "
           "upper points marked %zu", _source_name.c_str(), _dt_applied, _dt_clouds, _dt_skip_tf,
-          _dt_skip_age, _dt_skip_far, _dt_skip_trigger, _dt_low_seen,
+          _dt_skip_age, _dt_skip_far, _dt_skip_trigger, _dt_skip_feed, _dt_low_seen,
           100.0 * _dt_low_dropped / std::max<size_t>(_dt_low_seen, 1), _dt_up_marked);
-        _dt_clouds = _dt_applied = _dt_skip_tf = _dt_skip_age = _dt_skip_far = _dt_skip_trigger = 0;
+        _dt_clouds = _dt_applied = _dt_skip_tf = _dt_skip_age = _dt_skip_far = _dt_skip_trigger = _dt_skip_feed = 0;
         _dt_low_seen = _dt_low_dropped = _dt_up_marked = 0;
         _dt_report_time = now;
       }
     };
-  if (!_doors || _doors->empty()) {
-    ++_dt_skip_far;
+  const spatio_temporal_voxel_layer::DoorFeed::List door_list =
+    _doors ? _doors->Get(clock_->now().seconds(), _door_zone.feed_max_age) : nullptr;
+  if (!door_list || door_list->empty()) {
+    ++(door_list ? _dt_skip_far : _dt_skip_feed);
     report();
     return false;
   }
@@ -902,7 +904,7 @@ bool MeasurementBuffer::DoorTrustFilter(
   const double reach = std::hypot(hw + grow, hd + grow) + range_up;
   std::vector<Zone> zones;
   bool near_door = false;
-  for (const auto & d : *_doors) {
+  for (const auto & d : *door_list) {
     const tf2::Vector3 p = map_to_filter * tf2::Vector3(d.x, d.y, 0.0);
     if (std::hypot(p.x() - ox, p.y() - oy) > reach) {
       continue;

@@ -323,10 +323,19 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
       getName().c_str(), hold_max, hold_grace);
   }
 
-  // door zones of the map for the sources' door trust rule (DoorTrimLayer reads the same nodes
-  // with the same zone shape; keep the two blocks equal). Empty map_file = no zones = rule off.
+  // doors for the sources' door trust rule. source "map": the map's door nodes (DoorTrimLayer reads
+  // the same nodes with the same zone shape; keep the two blocks equal), empty map_file = rule off.
+  // source "planner": the doors the planner announces the robot is passing (planner_topic, a
+  // PoseArray in map_frame: node position and direction of travel), silent for feed_max_age = none.
+  _door_feed = std::make_shared<DoorFeed>();
   {
-    std::string map_file, err;
+    std::string map_file, err, source = "map", planner_topic = "/cona/planner/door_passage";
+    declareParameter("door_zones.source", rclcpp::ParameterValue(source));
+    declareParameter("door_zones.planner_topic", rclcpp::ParameterValue(planner_topic));
+    declareParameter("door_zones.feed_max_age", rclcpp::ParameterValue(_door_zone_params.feed_max_age));
+    node->get_parameter(name_ + ".door_zones.source", source);
+    node->get_parameter(name_ + ".door_zones.planner_topic", planner_topic);
+    node->get_parameter(name_ + ".door_zones.feed_max_age", _door_zone_params.feed_max_age);
     std::vector<std::string> types{"gate_private", "gate_public"};
     int floor = -1;
     declareParameter("door_zones.map_file", rclcpp::ParameterValue(std::string("")));
@@ -356,7 +365,39 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
     node->get_parameter(name_ + ".door_zones.trigger_margin", _door_zone_params.trigger_margin);
     node->get_parameter(name_ + ".door_zones.trigger_min_reach", trigger_min_reach);
     auto doors = std::make_shared<std::vector<Door>>();
-    if (!map_file.empty()) {
+    if (source == "planner") {
+      // the planner decides when a door counts (from the standby before it to 2 m past it on its
+      // path), so no map trigger here; the zone shape around each announced door is the same
+      _door_zone_params.trigger = false;
+      std::weak_ptr<DoorFeed> feed = _door_feed;
+      auto clock = node->get_clock();
+      const std::string map_frame = _door_zone_params.map_frame;
+      auto logger = logger_;
+      _door_passage_sub = node->create_subscription<geometry_msgs::msg::PoseArray>(
+        planner_topic, rclcpp::QoS(rclcpp::KeepLast(1)),
+        [feed, clock, map_frame, logger](geometry_msgs::msg::PoseArray::ConstSharedPtr msg) {
+          auto f = feed.lock();
+          if (!f) {
+            return;
+          }
+          if (msg->header.frame_id != map_frame) {
+            RCLCPP_WARN_THROTTLE(logger, *clock, 5000, "door passage in %s, expected %s; ignored",
+              msg->header.frame_id.c_str(), map_frame.c_str());
+            return;
+          }
+          auto list = std::make_shared<std::vector<Door>>();
+          for (const auto & p : msg->poses) {
+            const double yaw = 2.0 * std::atan2(p.orientation.z, p.orientation.w);
+            list->push_back({p.position.x, p.position.y, std::cos(yaw), std::sin(yaw)});
+          }
+          // stamped on arrival: the planner's clock need not match this node's
+          f->Set(list, clock->now().seconds());
+        });
+      RCLCPP_INFO(
+        logger_, "%s: door zones from the planner on %s (none after %.2f s of silence), %.2f x %.2f m",
+        getName().c_str(), planner_topic.c_str(), _door_zone_params.feed_max_age,
+        2.0 * _door_zone_params.half_width, 2.0 * _door_zone_params.half_depth);
+    } else if (!map_file.empty()) {
       size_t skipped = 0;
       if (!LoadDoorNodes(map_file, types, floor, *doors, err, &skipped)) {
         RCLCPP_ERROR(logger_, "%s: door zones: %s", getName().c_str(), err.c_str());
@@ -386,7 +427,9 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
         }
       }
     }
-    _door_nodes = doors;
+    if (source != "planner") {
+      _door_feed->Set(doors, -1.0);
+    }
   }
 
   matchSize();
@@ -699,8 +742,8 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
         // the rule reads heights in the robot's base frame and ranges from the sensor, keeps points
         // above max_obstacle_height for the z band to take, and needs a filter to drop its NaNs
         const char * why = nullptr;
-        if (!_door_nodes || _door_nodes->empty()) {
-          why = "has no door zones (door_zones.map_file)";
+        if (!_door_feed || (!_door_passage_sub && !_door_feed->Get(0.0, 0.0))) {
+          why = "has no door zones (door_zones.map_file, or door_zones.source planner)";
         } else if (height_filter_frame.empty() || height_filter_frame == _global_frame) {
           why = "needs height_filter_frame set to the robot's base frame";
         } else if (!sensor_frame.empty()) {
@@ -715,12 +758,13 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
         if (why != nullptr) {
           RCLCPP_WARN(logger_, "%s: door_trust %s; off", source.c_str(), why);
         } else {
-          _observation_buffers.back()->SetDoorTrust(door_trust, _door_zone_params, _door_nodes);
+          _observation_buffers.back()->SetDoorTrust(door_trust, _door_zone_params, _door_feed);
           const buffer::DoorTrustParams & dt = _observation_buffers.back()->DoorTrust();
           RCLCPP_INFO(
-            logger_, "%s: door trust in %zu door zones: within %.2f m, a point below %.2f m that reads "
+            logger_, "%s: door trust in %s door zones: within %.2f m, a point below %.2f m that reads "
             "%.3f..%.3f m nearer than the %.2f..%.2f m band in its %.1f deg azimuth (+-%d bins) is not marked",
-            source.c_str(), _door_nodes->size(), dt.range, max_obstacle_height, dt.margin, dt.depth,
+            source.c_str(), _door_passage_sub ? "the planner's" :
+            std::to_string(_door_feed->Get(0.0, 0.0)->size()).c_str(), dt.range, max_obstacle_height, dt.margin, dt.depth,
             max_obstacle_height, dt.up_max, dt.az_bin_deg, dt.az_neighbours);
         }
       }

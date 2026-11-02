@@ -3,6 +3,8 @@
 #ifndef SPATIO_TEMPORAL_VOXEL_LAYER__DOOR_ZONES_HPP_
 #define SPATIO_TEMPORAL_VOXEL_LAYER__DOOR_ZONES_HPP_
 
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -43,6 +45,37 @@ bool LoadDoorNodes(
 int PairStandbyNodes(
   const std::string & file, const std::string & type, double max_dist, double max_lateral,
   std::vector<Door> & doors, std::string & err);
+
+/**
+ * \brief The doors the door trust rule works with: fixed (the map's door nodes) or the planner's
+ * latest announcement of the doors the robot is passing, which goes stale after a timeout.
+ */
+class DoorFeed
+{
+public:
+  using List = std::shared_ptr<const std::vector<Door>>;
+  // stamp in seconds of the clock that Get() is given; a negative stamp never goes stale
+  void Set(List doors, double stamp)
+  {
+    std::lock_guard<std::mutex> lk(m_);
+    doors_ = std::move(doors);
+    stamp_ = stamp;
+  }
+  // the doors, or nullptr when none were set or they are older than max_age (s)
+  List Get(double now, double max_age) const
+  {
+    std::lock_guard<std::mutex> lk(m_);
+    if (!doors_ || (stamp_ >= 0.0 && now - stamp_ > max_age)) {
+      return nullptr;
+    }
+    return doors_;
+  }
+
+private:
+  mutable std::mutex m_;
+  List doors_;
+  double stamp_{-1.0};
+};
 
 }  // namespace spatio_temporal_voxel_layer
 

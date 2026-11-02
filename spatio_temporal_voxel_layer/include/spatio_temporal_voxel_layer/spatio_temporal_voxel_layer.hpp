@@ -70,6 +70,7 @@
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "geometry_msgs/msg/point.hpp"
+#include "geometry_msgs/msg/pose_array.hpp"
 #include "spatio_temporal_voxel_layer/srv/save_grid.hpp"
 #include "std_srvs/srv/set_bool.hpp"
 // projector
@@ -190,8 +191,10 @@ private:
   std::string _global_frame;
   // Door zones of the map for the sources' door trust rule (door_zones.* parameters); the list is
   // fixed after configure and shared read-only with the buffers.
-  buffer::door_list_ptr _door_nodes;
+  buffer::door_feed_ptr _door_feed;
   buffer::DoorZoneParams _door_zone_params;
+  // door_zones.source planner: the planner's announcement of the doors the robot is passing
+  rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr _door_passage_sub;
   // Fallback for a source pointed at a processed topic whose producer may not be running.
   // See ResolveSourceTopic in the .cpp.
   double _topic_fallback_wait{3.0};

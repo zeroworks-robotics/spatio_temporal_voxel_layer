@@ -82,7 +82,7 @@ enum class Filters
 // conveniences for line lengths
 typedef std::list<observation::MeasurementReading>::iterator readings_iter;
 typedef std::unique_ptr<sensor_msgs::msg::PointCloud2> point_cloud_ptr;
-typedef std::shared_ptr<const std::vector<spatio_temporal_voxel_layer::Door>> door_list_ptr;
+typedef std::shared_ptr<spatio_temporal_voxel_layer::DoorFeed> door_feed_ptr;
 
 // Door ray trust, a lidar marking source only (see MeasurementBuffer::DoorTrustFilter).
 // Heights are in height_filter_frame (base_link); ranges are horizontal, from the lidar.
@@ -111,6 +111,8 @@ struct DoorZoneParams
   // widened by trigger_margin; false = whenever the lidar sees the zone
   bool trigger{false};
   double trigger_margin{0.10};
+  // planner-fed doors (door_zones.source planner): older than this (s) = no door
+  double feed_max_age{0.5};
 };
 
 // Measurement buffer
@@ -195,7 +197,7 @@ public:
   // Door ray trust: in the map's door zones, a lower-band point that reads 0..depth nearer than the
   // upper band in the same azimuth is not marked, and the upper band is marked there. `doors` may be
   // empty (the rule then never runs). See DoorTrustFilter.
-  void SetDoorTrust(const DoorTrustParams & params, const DoorZoneParams & zones, door_list_ptr doors);
+  void SetDoorTrust(const DoorTrustParams & params, const DoorZoneParams & zones, door_feed_ptr doors);
   bool DoorTrustEnabled(void) const {return _door_trust.enabled;}
   // Switches a configured door trust rule off and on at run time (parameter door_trust).
   void SetDoorTrustOn(const bool & on) {_door_trust_on = on;}
@@ -261,9 +263,9 @@ private:
   DoorTrustParams _door_trust;
   bool _door_trust_on{true};
   DoorZoneParams _door_zone;
-  door_list_ptr _doors;
+  door_feed_ptr _doors;
   // door trust counters since the last report: clouds seen / rule ran / skipped by reason
-  size_t _dt_clouds{0}, _dt_applied{0}, _dt_skip_tf{0}, _dt_skip_age{0}, _dt_skip_far{0}, _dt_skip_trigger{0};
+  size_t _dt_clouds{0}, _dt_applied{0}, _dt_skip_tf{0}, _dt_skip_age{0}, _dt_skip_far{0}, _dt_skip_trigger{0}, _dt_skip_feed{0};
   size_t _dt_low_seen{0}, _dt_low_dropped{0}, _dt_up_marked{0};
   rclcpp::Time _dt_report_time{0, 0, RCL_ROS_TIME};
   bool _dt_first_logged{false};
